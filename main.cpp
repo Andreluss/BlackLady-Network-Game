@@ -15,7 +15,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <arpa/inet.h>
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <cinttypes>
+#include <netdb.h>
+#include <cstddef>
+#include <unistd.h>
+#include <csignal>
+#include <fcntl.h>
+#include <ranges>
+#include <regex>
 
 [[noreturn]] void syserr(const char* fmt, ...) {
     va_list fmt_args;
@@ -60,13 +71,6 @@ void error(const char* fmt, ...) {
     fprintf(stderr, "\n");
 }
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <cinttypes>
-#include <netdb.h>
-#include <cstddef>
-#include <unistd.h>
-#include <csignal>
 
 uint16_t read_port(char const *string) {
     char *endptr;
@@ -78,10 +82,10 @@ uint16_t read_port(char const *string) {
     return (uint16_t) port;
 }
 
-struct sockaddr_in get_server_address(char const *host, uint16_t port) {
+struct sockaddr_storage get_server_address(char const *host, uint16_t port) {
     struct addrinfo hints{};
     memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_INET; // IPv4
+    hints.ai_family = AF_UNSPEC; // IPv4 or IPv6
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
@@ -91,15 +95,34 @@ struct sockaddr_in get_server_address(char const *host, uint16_t port) {
         fatal("getaddrinfo: %s", gai_strerror(errcode));
     }
 
-    struct sockaddr_in send_address{};
-    send_address.sin_family = AF_INET;   // IPv4
-    send_address.sin_addr.s_addr =       // IP address
-            ((struct sockaddr_in *) (address_result->ai_addr))->sin_addr.s_addr;
-    send_address.sin_port = htons(port); // port from the command line
+    struct sockaddr_storage send_address{};
+    memcpy(&send_address, address_result->ai_addr, address_result->ai_addrlen);
 
     freeaddrinfo(address_result);
 
     return send_address;
+}
+
+void getSocketAddresses(int socket_fd, std::string& localIP, int& localPort, std::string& remoteIP, int& remotePort) {
+    struct sockaddr_storage local_address{}, remote_address{};
+    socklen_t address_length = sizeof(struct sockaddr_storage);
+
+    // Get local address
+    if (getsockname(socket_fd, (struct sockaddr*)&local_address, &address_length) == -1) {
+        // Handle error
+    }
+    char ipstr[INET6_ADDRSTRLEN];
+    inet_ntop(local_address.ss_family, &local_address, ipstr, sizeof(ipstr));
+    localIP = ipstr;
+    localPort = ntohs(((struct sockaddr_in*)&local_address)->sin_port);
+
+    // Get remote address
+    if (getpeername(socket_fd, (struct sockaddr*)&remote_address, &address_length) == -1) {
+        // Handle error
+    }
+    inet_ntop(remote_address.ss_family, &remote_address, ipstr, sizeof(ipstr));
+    remoteIP = ipstr;
+    remotePort = ntohs(((struct sockaddr_in*)&remote_address)->sin_port);
 }
 
 void install_signal_handler(int signal, void (*handler)(int), int flags) {
@@ -116,30 +139,6 @@ void install_signal_handler(int signal, void (*handler)(int), int flags) {
     }
 }
 
-enum class Seat {
-    N,
-    E,
-    S,
-    W
-};
-Seat nextSeat(Seat seat) {
-    switch (seat) {
-        case Seat::N: return Seat::E;
-        case Seat::E: return Seat::S;
-        case Seat::S: return Seat::W;
-        case Seat::W: return Seat::N;
-    }
-}
-std::string toString(Seat seat) {
-    switch (seat) {
-        case Seat::N: return "N";
-        case Seat::E: return "E";
-        case Seat::S: return "S";
-        case Seat::W: return "W";
-    }
-}
-
-// write a collection of color constants
 struct Color {
     static constexpr const char* Red = "\033[31m";
     static constexpr const char* Green = "\033[32m";
@@ -150,6 +149,61 @@ struct Color {
     static constexpr const char* Reset = "\033[0m";
 };
 
+class Reporter {
+public:
+    static void debug(std::string color, std::string message) {
+        std::cerr << color << message << Color::Reset << std::endl;
+    }
+    static void error(std::string message) {
+        std::cerr << "[------------]" << Color::Red << message << Color::Reset << std::endl;
+    }
+    static void logError(std::string message) {
+        std::cerr << Color::Red << "[Error] " << Color::Reset << message << std::endl;
+    }
+    static void logWarning(std::string message) {
+        std::cerr << Color::Yellow << "[Warning] " << Color::Reset << message << std::endl;
+    }
+
+    static void report(const std::string &senderIP, int senderPort, const std::string &receiverIP, int receiverPort,
+                       const std::string &time, const std::string &message) {
+        std::cout << "[" << senderIP << ":" << senderPort << "," << receiverIP << ":" << receiverPort << "," << time
+                  << "] " << message << std::endl;
+    }
+};
+std::string getCurrentTime() {
+    time_t now = time(nullptr);
+    struct tm *tm_info = localtime(&now);
+    char buffer[26];
+    strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", tm_info);
+    return buffer;
+}
+enum class Seat {
+    N = 'N',
+    E = 'E',
+    S = 'S',
+    W = 'W',
+};
+
+Seat nextSeat(Seat seat) {
+    switch (seat) {
+        case Seat::N: return Seat::E;
+        case Seat::E: return Seat::S;
+        case Seat::S: return Seat::W;
+        case Seat::W: return Seat::N;
+    }
+    throw std::invalid_argument("Invalid seat");
+}
+
+std::string toString(Seat seat) {
+    switch (seat) {
+        case Seat::N: return "N";
+        case Seat::E: return "E";
+        case Seat::S: return "S";
+        case Seat::W: return "W";
+    }
+    Reporter::error("Invalid seat");
+    return "";
+}
 
 enum class DealType {
     // nie brać lew, za każdą wziętą lewę dostaje się 1 punkt;
@@ -221,6 +275,44 @@ public:
         }
         return valueStr + suitStr;
     }
+    explicit Card(const std::string& cardStr) {
+        std::regex card_regex(R"((10|[23456789JQKA])([CDHS]))");
+        std::smatch match;
+        if (std::regex_match(cardStr, match, card_regex)) {
+            std::string valueStr = match[1].str();
+            std::string suitStr = match[2].str();
+
+            // Parse the value
+            if (valueStr == "10") {
+                value = CardValue::Ten;
+            } else {
+                switch (valueStr[0]) {
+                    case '2': value = CardValue::Two; break;
+                    case '3': value = CardValue::Three; break;
+                    case '4': value = CardValue::Four; break;
+                    case '5': value = CardValue::Five; break;
+                    case '6': value = CardValue::Six; break;
+                    case '7': value = CardValue::Seven; break;
+                    case '8': value = CardValue::Eight; break;
+                    case '9': value = CardValue::Nine; break;
+                    case 'J': value = CardValue::Jack; break;
+                    case 'Q': value = CardValue::Queen; break;
+                    case 'K': value = CardValue::King; break;
+                    case 'A': value = CardValue::Ace; break;
+                    default: throw std::invalid_argument("Invalid card value");
+                }
+            }
+
+            // Parse the suit
+            switch (suitStr[0]) {
+                case 'C': suit = CardSuit::Clubs; break;
+                case 'D': suit = CardSuit::Diamonds; break;
+                case 'H': suit = CardSuit::Hearts; break;
+                case 'S': suit = CardSuit::Spades; break;
+                default: throw std::invalid_argument("Invalid card suit");
+            }
+        }
+    }
 };
 
 /*
@@ -253,15 +345,19 @@ Komunikat wysyłany przez serwer do klientów po zakończeniu rozdania. Informuj
 
 class Msg {
 public:
-    virtual std::string toString() = 0;
+    virtual std::string toString() const = 0;
     virtual ~Msg() = default;
+    // write a auto conversion to std::string
+     explicit operator std::string() {
+        return toString();
+    }
 };
 
 class IAm : public Msg {
-    Seat seat;
 public:
+    Seat seat;
     explicit IAm(Seat seat) : seat(seat) {}
-    std::string toString() override {
+    std::string toString() const override {
         return "IAM" + ::toString(seat) + "\r\n";
     }
 };
@@ -270,7 +366,7 @@ class Busy : public Msg {
     std::vector<Seat> busy_seats;
 public:
     explicit Busy(std::vector<Seat> busy_seats) : busy_seats(std::move(busy_seats)) {}
-    std::string toString() override {
+    std::string toString() const override {
         std::string result = "BUSY";
         for (const auto& seat: busy_seats) {
             result += ::toString(seat);
@@ -280,22 +376,31 @@ public:
     }
 };
 
-class Taken : public Msg {
+class Deal : public Msg {
+    DealType dealType;
+    Seat firstSeat;
     std::vector<Card> cards;
-    Seat seat;
 public:
-    Taken(std::vector<Card> cards, Seat seat) : cards(std::move(cards)), seat(seat) {}
+    Deal(DealType dealType, Seat firstSeat, std::vector<Card> cards) : dealType(dealType), firstSeat(firstSeat), cards(std::move(cards)) {}
+    std::string toString() const override {
+        std::string result = "DEAL" + std::to_string(static_cast<int>(dealType)) + ::toString(firstSeat);
+        for (const auto& card: cards) {
+            result += card.toString();
+        }
+        result += "\r\n";
+        return result;
+    }
 };
 
 class Trick : public Msg {
-    int trickNumber; // 1-13
-    std::vector<Card> cardsOnTable;
 public:
+    std::vector<Card> cardsOnTable;
+    int trickNumber; // 1-13
     static constexpr int FirstTrickNumber = 1;
     Trick(int trickNumber, std::vector<Card> cardsOnTable) : trickNumber(trickNumber), cardsOnTable(std::move(cardsOnTable)) {
         assert(trickNumber >= FirstTrickNumber && trickNumber <= 13);
     }
-    std::string toString() override {
+    std::string toString() const override {
         std::string result = "TRICK" + std::to_string(trickNumber);
         for (const auto & card : cardsOnTable) {
             result += card.toString();
@@ -304,38 +409,167 @@ public:
         return result;
     }
 };
-// ...
+
+class Wrong : public Msg {
+public:
+    int trickNumber;
+    explicit Wrong(int trickNumber) : trickNumber(trickNumber) {
+        assert(trickNumber >= Trick::FirstTrickNumber && trickNumber <= 13);
+    }
+    [[nodiscard]] std::string toString() const override {
+        return "WRONG" + std::to_string(trickNumber) + "\r\n";
+    }
+};
+
+class Taken : public Msg {
+public:
+    int trickNumber;
+    std::vector<Card> cardsOnTable;
+    Seat takerSeat;
+    explicit Taken(int trickNumber, std::vector<Card> cardsOnTable, Seat takerSeat) : trickNumber(trickNumber), cardsOnTable(std::move(cardsOnTable)), takerSeat(takerSeat) {
+        assert(trickNumber >= Trick::FirstTrickNumber && trickNumber <= 13);
+    }
+    [[nodiscard]] std::string toString() const override {
+        std::string result = "TAKEN" + std::to_string(trickNumber);
+        for (const auto & card : cardsOnTable) {
+            result += card.toString();
+        }
+        result += ::toString(takerSeat) + "\r\n";
+        return result;
+    }
+};
+
+class Score : public Msg {
+public:
+    std::unordered_map<Seat, int> scores;
+    explicit Score(std::unordered_map<Seat, int> scores) : scores(std::move(scores)) {}
+    [[nodiscard]] std::string toString() const override {
+        std::string result = "SCORE";
+        for (const auto& [seat, score]: scores) {
+            result += ::toString(seat) + std::to_string(score);
+        }
+        result += "\r\n";
+        return result;
+    }
+};
+
+class Total : public Msg {
+public:
+    std::unordered_map<Seat, int> total_scores;
+    explicit Total(std::unordered_map<Seat, int> total_scores) : total_scores(std::move(total_scores)) {}
+    [[nodiscard]] std::string toString() const override {
+        std::string result = "TOTAL";
+        for (const auto& [seat, score]: total_scores) {
+            result += ::toString(seat) + std::to_string(score);
+        }
+        result += "\r\n";
+        return result;
+    }
+};
 
 class Parser {
 public:
     static std::shared_ptr<Msg> parse(std::string message) {
-        if (message.size() == 1) {
-            return std::shared_ptr<IAm>(new IAm(Seat::N));
+        std::smatch match;
+
+        try {
+            std::regex IAM_regex(R"(^IAM([NESW])\r\n$)");
+            std::regex BUSY_regex(R"(^BUSY([NESW]+)\r\n$)");
+            std::regex DEAL_regex(R"(^DEAL([1-7])([NESW])((10|[23456789JQKA])[CDHS]){13}\r\n$)");
+            std::regex TRICK_regex(R"(^TRICK([1-9]|1[0-3])((10|[23456789JQKA])[CDHS]){0,3}\r\n$)");
+            std::regex WRONG_regex(R"(^WRONG([1-9]|1[0-3])\r\n$)");
+            std::regex TAKEN_regex(R"(^TAKEN([1-9]|1[0-3])((10|[23456789JQKA])[CDHS]){4}([NESW])\r\n$)");
+            std::regex SCORE_regex(R"(^SCORE([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)\r\n$)");
+            std::regex TOTAL_regex(R"(^TOTAL([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)\r\n$)");
+
+            if (std::regex_match(message, match, IAM_regex)) {
+                Seat seat = Seat(match[1].str()[0]);
+                return std::make_shared<IAm>(seat);
+            } else if (std::regex_match(message, match, BUSY_regex)) {
+                std::string seatsStr = match[1].str();
+                std::vector<Seat> busySeats;
+                for (char seatChar: seatsStr) {
+                    busySeats.push_back(Seat(seatChar));
+                }
+                return std::make_shared<Busy>(busySeats);
+            } else if (std::regex_match(message, match, DEAL_regex)) {
+                DealType dealType = static_cast<DealType>(std::stoi(match[1].str()));
+                Seat firstSeat = Seat(match[2].str()[0]);
+                std::vector<Card> cards;
+                std::string cardsStr = match[3].str();
+                std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
+                std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
+                std::sregex_iterator end;
+                while (it != end) {
+                    std::smatch card_match = *it;
+                    std::string cardStr = card_match.str();
+                    cards.push_back(Card(cardStr));
+                    ++it;
+                }
+                return std::make_shared<Deal>(dealType, firstSeat, cards);
+            } else if (std::regex_match(message, match, TRICK_regex)) {
+                int trickNumber = std::stoi(match[1].str());
+                std::vector<Card> cards;
+                std::string cardsStr = match[2].str();
+                std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
+                std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
+                std::sregex_iterator end;
+                while (it != end) {
+                    std::smatch card_match = *it;
+                    std::string cardStr = card_match.str();
+                    cards.push_back(Card(cardStr));
+                    ++it;
+                }
+                return std::make_shared<Trick>(trickNumber, cards);
+            } else if (std::regex_match(message, match, WRONG_regex)) {
+                int trickNumber = std::stoi(match[1].str());
+                return std::make_shared<Wrong>(trickNumber);
+            } else if (std::regex_match(message, match, TAKEN_regex)) {
+                int trickNumber = std::stoi(match[1].str());
+                std::vector<Card> cards;
+                std::string cardsStr = match[2].str();
+                std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
+                std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
+                std::sregex_iterator end;
+                while (it != end) {
+                    std::smatch card_match = *it;
+                    std::string cardStr = card_match.str();
+                    cards.push_back(Card(cardStr));
+                    ++it;
+                }
+                Seat takerSeat = Seat(match[4].str()[0]);
+                return std::make_shared<Taken>(trickNumber, cards, takerSeat);
+            } else if (std::regex_match(message, match, SCORE_regex)) {
+                std::unordered_map<Seat, int> scores;
+                for (int i = 0; i < 4; ++i) {
+                    Seat seat = Seat(match[i * 2 + 1].str()[0]);
+                    int score = std::stoi(match[i * 2 + 2].str());
+                    scores[seat] = score;
+                }
+                return std::make_shared<Score>(scores);
+            } else if (std::regex_match(message, match, TOTAL_regex)) {
+                std::unordered_map<Seat, int> total_scores;
+                for (int i = 0; i < 4; ++i) {
+                    Seat seat = Seat(match[i * 2 + 1].str()[0]);
+                    int score = std::stoi(match[i * 2 + 2].str());
+                    total_scores[seat] = score;
+                }
+                return std::make_shared<Total>(total_scores);
+            }
         }
-        else {
-            return std::make_shared<Busy>(std::vector<Seat>{Seat::N, Seat::E});
+        catch (std::invalid_argument& e) {
+            Reporter::debug(Color::Red, e.what());
         }
+
+        return nullptr; // Message not recognized
     }
 };
+
 
 struct DealConfig {
     DealType dealType;
     Seat firstSeat;
     std::unordered_map<Seat, std::vector<Card>> cards;
-};
-
-
-class Reporter {
-public:
-    static void report(std::string message) {
-        std::cout << message << std::endl;
-    }
-    static void debug(std::string message) {
-        std::cerr << message << std::endl;
-    }
-    static void debug(std::string color, std::string message) {
-        std::cerr << color << message << Color::Reset << std::endl;
-    }
 };
 
 class PollBuffer {
@@ -405,28 +639,35 @@ private:
     }
 
 public:
-    PollBuffer(std::string msg_separator, struct pollfd* pollfd) {
+     /*explicit*/ PollBuffer(struct pollfd *pollfd, std::string msg_separator = "\r\n") {
         buffer_in_msg_separator = std::move(msg_separator);
         this->pollfd = pollfd;
+        if (pollfd != nullptr && pollfd->fd != -1) {
+            pollfd->events = POLLIN;
+        }
     }
-    // function for making sure the client is disconnected and clearing its buffers (it's called after a poll error)
+    PollBuffer(): PollBuffer(nullptr) {}
+
+
+
+
+    // function for making sure the client is disconnected and clearing its players (it's called after a poll error)
     void disconnect() {
         // close the socket
         close(pollfd->fd);
-        // clear the buffers
+        // clear the players
         buffer_in.clear();
         buffer_out.clear();
         // clear the pollfd structure
         pollfd->fd = -1;
         pollfd->events = 0;
         pollfd->revents = 0;
-        Reporter::debug("Client disconnected.");
     }
-    // function called when settings the PollBuffer object for a new client that has just connected (and it's descriptor is in the pollfds array)
+    // function called when settings the PollBuffer object for a new client that has just connected (and it's descriptor is in the fds array)
     void connect(struct pollfd* _pollfd) {
         // set the pollfd structure
         this->pollfd = _pollfd;
-        // clear the buffers
+        // clear the players
         buffer_in.clear();
         buffer_out.clear();
 
@@ -442,6 +683,7 @@ public:
         }
         updatePollIn();
         updatePollOut();
+        Reporter::debug(Color::Yellow, "Buffer in: " + buffer_in);
     }
     bool hasError() const {
         return error;
@@ -449,21 +691,40 @@ public:
     bool hasMessage() {
         return buffer_in.find(buffer_in_msg_separator) != std::string::npos;
     }
+    bool isWriting() {
+        return !buffer_out.empty();
+    }
     std::string readMessage() {
         assert(hasMessage());
         auto pos = buffer_in.find(buffer_in_msg_separator);
         // return the message including the separator and remove it from the buffer
         std::string message = buffer_in.substr(0, pos + buffer_in_msg_separator.size());
         buffer_in.erase(0, pos + buffer_in_msg_separator.size());
+
+        std::string localIP, remoteIP; int localPort, remotePort;
+        getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
+        Reporter::report(remoteIP, remotePort, localIP, localPort, getCurrentTime(), message);
+
         return message;
     }
-//    time_t lastMessageTime
 
     void writeMessage(const std::string& message) {
         assert(!message.empty());
         buffer_out += message;
         // add the POLLOUT flag
         pollfd->events |= POLLOUT;
+
+        std::string localIP, remoteIP; int localPort, remotePort;
+        getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
+        Reporter::report(localIP, localPort, remoteIP, remotePort, getCurrentTime(), message);
+    }
+
+    void writeMessage(const Msg& message) {
+        writeMessage(message.toString());
+    }
+
+    [[nodiscard]] bool isConnected() const {
+        return pollfd != nullptr && pollfd->fd != -1;
     }
 };
 
@@ -493,47 +754,261 @@ private:
     ServerConfig config;
 
 
-    // setter and getter for poll - seat mapping
-
-    std::optional<Seat> pollIndexToSeat[PollConnections]{};
-    int SeatToPollIndex(Seat seat) {
-//        switch (seat) {
-//            case Seat::N: return 0;
-//            case Seat::E: return 1;
-//            case Seat::S: return 2;
-//            case Seat::W: return 3;
-//        }
-        return 0 + rand() % 2;
-    }
 
     struct Polling {
-        static constexpr int PollConnections = 6;
-        struct pollfd pollfds[PollConnections];
-        std::vector<PollBuffer> poll_buffers; // TODO - maybe let the poll buffers have a fixed mapping 0 - N, 1 - E, 2 - S, 3 - W, but different pointers to pollfds
-        // function retruning the number of connected players
-        int connectedPlayers() {
-            int connected = 0;
-            for (int i = 0; i < 4; i++) {
-                if (pollfds[i].fd != -1) {
-                    connected++;
-                }
-            }
-            return connected;
-        }
-    } poll;
+        static constexpr int Connections = 6;
+        struct pollfd fds[Connections]{};
+        const int fdAcceptIdx = 0;
 
+//        const int fdPlayersIdx[4] = {0, 1, 2, 3};
+        explicit Polling() {
+            for (auto &fd: fds) {
+                fd.fd = -1;
+                fd.events = 0;
+                fd.revents = 0;
+            }
+        }
+
+        struct Candidate {
+            PollBuffer buffer;
+            enum State {
+                WaitingForIAM,
+                Rejecting,
+            } state;
+            time_t connectionTime;
+
+            explicit Candidate(PollBuffer buffer, State state = State::WaitingForIAM)
+                    : buffer(std::move(buffer)), state(state), connectionTime(time(nullptr)) {}
+        };
+
+        std::vector<Candidate> candidates{}; // in/out buffer wrappers for candidate players (without a seat yet)
+
+        void startAccepting(int port) {
+            fds[fdAcceptIdx].fd = socket(AF_INET6, SOCK_STREAM, 0);
+            if (fds[fdAcceptIdx].fd < 0) {
+                syserr("cannot create a socket");
+            }
+
+            // enable address and port reuse
+            int optval = 1;
+            if (setsockopt(fds[fdAcceptIdx].fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &optval, sizeof optval) < 0) {
+                syserr("setsockopt SO_REUSEADDR");
+            }
+
+            struct sockaddr_in6 server_address{};
+            server_address.sin6_family = AF_INET6; // IPv6
+            server_address.sin6_addr = in6addr_any; // Listening on all interfaces.
+            server_address.sin6_port = htons(port);
+            if (bind(fds[fdAcceptIdx].fd, (struct sockaddr *) &server_address, (socklen_t) sizeof server_address) < 0) {
+                syserr("bind");
+            }
+
+
+            const int QueueLength = 4;
+            if (listen(fds[fdAcceptIdx].fd, QueueLength) < 0) {
+                syserr("listen");
+            }
+
+            auto length = (socklen_t) sizeof server_address;
+            if (getsockname(fds[fdAcceptIdx].fd, (struct sockaddr *) &server_address, &length) < 0) {
+                syserr("getsockname");
+            }
+            Reporter::debug(Color::Green,
+                            "Server is listening on port " + std::to_string(ntohs(server_address.sin6_port)));
+
+            fds[fdAcceptIdx].events = POLLIN;
+            fds[fdAcceptIdx].revents = 0;
+        }
+
+        void pauseAccepting() {
+            fds[fdAcceptIdx].events = 0;
+        }
+
+        void resumeAccepting() {
+            fds[fdAcceptIdx].events = POLLIN;
+        }
+
+        void stopAccepting() {
+            close(fds[fdAcceptIdx].fd);
+            fds[fdAcceptIdx].fd = -1;
+        }
+
+        
+
+    } poll;
+    
+    std::vector<Seat> getTakenSeats() {
+        std::vector<Seat> takenSeats;
+        for (const auto &[seat, player]: players) {
+            if (player.buffer.isConnected())
+                takenSeats.push_back(seat);
+        }
+        return takenSeats;
+    }
+    
+    struct Player {
+        PollBuffer buffer;
+        time_t trickRequestTime{};
+        Seat seat{};
+
+        explicit Player(Seat seat, PollBuffer buffer) : buffer(std::move(buffer)), seat(seat) {}
+
+        [[nodiscard]] bool isConnected() const {
+            return buffer.isConnected();
+        }
+    };
+
+    std::unordered_map<Seat, Player> players{
+            {Seat::N, Player(Seat::N, PollBuffer())},
+            {Seat::E, Player(Seat::E, PollBuffer())},
+            {Seat::S, Player(Seat::S, PollBuffer())},
+            {Seat::W, Player(Seat::W, PollBuffer())}
+    }; // in/out buffer wrappers for players (with a seat)
+
+    
     void safePoll() {
         while (true) {
-            ::poll(pollfds, PollConnections, 1000);
+            // ---- run poll and update the player poll players ----
+            // reset revents
+            for (auto &fd: poll.fds) {
+                fd.revents = 0;
+            }
+            ::poll(poll.fds, poll.Connections, config.timeout_seconds * 1000 / 10);
+            for (auto &[seat, player]: players) {
+                if (player.buffer.isConnected())
+                    player.buffer.update();
+            }
+            for (auto &candidate: poll.candidates) {
+                candidate.buffer.update();
+            }
 
-            // if poll has no errors then return
-            if (rand() % 2) return;
+            // (1) update disconnections and remove disconnected players
+            for (auto &[seat, player]: players) {
+                if (player.buffer.hasError()) {
+                    // disconnect the player
+                    player.buffer.disconnect();
+                    Reporter::debug(Color::Red, "Player " + ::toString(seat) + " disconnected.");
 
+                    // remove the player from the players
+                    players.erase(seat);
+                }
+            }
+
+            // (2) check if there are any new connections
+            if (poll.fds[poll.fdAcceptIdx].revents & POLLIN) {
+                struct sockaddr_in client_address{};
+                socklen_t client_address_len = sizeof(client_address);
+                int client_fd = accept(poll.fds[poll.fdAcceptIdx].fd, (struct sockaddr *) &client_address,
+                                       &client_address_len);
+                if (client_fd < 0) {
+                    syserr("accept");
+                }
+
+                // Set to nonblocking mode.
+                if (fcntl(client_fd, F_SETFL, O_NONBLOCK)) {
+                    syserr("fcntl");
+                }
+
+                // find the first free pollfd for candidates and set it
+                bool accepted = false;
+                for (int candidateFdIdx: std::views::iota(0, poll.Connections)) {
+                    if (poll.fds[candidateFdIdx].fd == -1) {
+                        poll.fds[candidateFdIdx].fd = client_fd;
+                        Polling::Candidate candidate(PollBuffer(&poll.fds[candidateFdIdx]));
+                        poll.candidates.push_back(candidate);
+                        Reporter::debug(Color::Green, "New candidate connected.");
+                        accepted = true;
+                        break;
+                    }
+                }
+
+                // if no free pollfd was found, close the connection
+                if (!accepted) {
+                    Reporter::error("Should not happen - no free pollfd for candidate.");
+                    close(client_fd);
+                }
+            }
+
+            // (3) check if there are any new IAM messages from candidates
+            for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
+                auto &[buffer, candidate_state, connectionTime] = *candidate;
+
+                if (candidate->buffer.hasError()) {
+                    // disconnect the candidate
+                    candidate->buffer.disconnect();
+                    Reporter::debug(Color::Red, "Candidate disconnected due to error.");
+
+                    // remove the player from the players
+                    candidate = poll.candidates.erase(
+                            candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
+                    continue;
+                }
+
+                if (candidate->state == Polling::Candidate::State::WaitingForIAM) {
+                    // check timeout todo check: maybe we should check hasMessage first
+                    if (time(nullptr) - candidate->connectionTime >
+                        config.timeout_seconds) { // higher timeout accuracy? todo check
+                        buffer.disconnect();
+                        Reporter::debug(Color::Red, "Candidate disconnected due to timeout.");
+
+                        // remove the candidate
+                        candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
+                        continue;
+                    }
+
+
+                    if (candidate->buffer.hasMessage()) {
+                        auto msg = Parser::parse(candidate->buffer.readMessage());
+                        if (auto iam = std::dynamic_pointer_cast<IAm>(msg)) {
+                            // (a) first check, if the seat is not already taken
+                            if (players.at(iam->seat).isConnected()) {
+                                buffer.writeMessage(Busy(getTakenSeats()));
+                                candidate->state = Polling::Candidate::State::Rejecting; // we cannot disconnect candidate yet
+                            } else {
+                                // (b) if the seat is free, accept
+                                // change: candidate -> player
+                                players.at(iam->seat).buffer = (buffer);
+                                poll.candidates.erase(candidate);
+
+                                // CAUTION: send the TAKEN history from the current deal only
+                                auto &buf = players.at(iam->seat).buffer;
+                                buf.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat,
+                                                      game.currentDeal->cards[iam->seat]));
+                                for (auto &taken: game.takenHistory) {
+                                    buf.writeMessage(taken);
+                                }
+                                Reporter::debug(Color::Green,
+                                                "Candidate accepted, connected and updated with history of (" +
+                                                std::to_string(game.takenHistory.size()) + ") taken cards.");
+                            }
+                        } else {
+                            // (c) if the message is not IAM, close immediately
+                            buffer.disconnect();
+                            Reporter::debug(Color::Red, "Candidate disconnected due to wrong message.");
+
+                            // remove the candidate
+                            candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
+                            continue;
+                        }
+                    }
+                } else if (candidate_state == Polling::Candidate::State::Rejecting) {
+                    if (buffer.isWriting()) {
+                        // wait for the message to be sent
+                    } else {
+                        // disconnect and remove the candidate
+                        buffer.disconnect();
+                        candidate = poll.candidates.erase(candidate);
+                        Reporter::debug(Color::Red, "Candidate successfully rejected and disconnected.");
+                        continue;
+                    }
+                }
+                candidate++;
+            }
 
 
         }
     }
-;
+
 
     struct GameData {
         std::vector<DealConfig>::iterator currentDeal;
@@ -542,14 +1017,14 @@ private:
 
         std::unordered_map<Seat, PlayerStats> playerStats;
         int trickNumber = Trick::FirstTrickNumber; // 1-13
-        Seat firstPlayer{};
-        Seat currentPlayer{};
+        Seat firstPlayerSeat{};
+        Player* currentPlayer{};
         int currentPlayerPollIdx{};
 
         Seat trickWinner{};
 
         // Assume: trickNumber is set for the current trick.
-        Seat getStartingPlayer() const {
+        Seat getStartingSeat() const {
             if (trickNumber == Trick::FirstTrickNumber) {
                 return currentDeal->firstSeat;
             }
@@ -564,35 +1039,74 @@ private:
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
     bool stateShouldPoll = true; // bending spoons
 
-    void stateSendTrick() {
-        auto idx = SeatToPollIndex(game.currentPlayer);
-        Trick trick(game.trickNumber, game.cardsOnTable);
-        poll_buffers[idx].writeMessage(trick.toString()); // todo reporting
-        state = [this] { stateWaitForMessage(); };
+    void ChangeState(std::function<void()> newState, bool shouldPoll = true) {
+        state = std::move(newState);
+        stateShouldPoll = shouldPoll;
     }
 
-    void stateWaitForMessage() {
+    void stateSendTrick() {
+        game.currentPlayer->buffer.writeMessage(Trick(game.trickNumber, game.cardsOnTable));
+        // report
+        state = [this] { stateWaitForTrick(); };
+    }
+
+    void stateWaitForTrick() {
         // Poll is already called and has some revents (possibly only timeout)
         // 1) check if there was any timeout for any player,
         // 2) update the poll timeout to <=smallest interval to upcoming timeout event
-        if (!poll_buffers[game.currentPlayerPollIdx].hasMessage()) {
+//        if (!poll_buffers[game.currentPlayerPollIdx].hasMessage()) {
+//            // Check if timeout has been reached
+//            Reporter::debug("no messages from the current player..");
+//            return;
+//        }
+
+        // todo
+        // Check other players' messages .. should be none or trick attempts which will be wrong'ed
+
+        // this is checked *first*, regardless of the timeout, because of safePoll which could have paused the game
+        if (game.currentPlayer->buffer.hasMessage()) {
+            auto msg = Parser::parse(game.currentPlayer->buffer.readMessage());
+
+            if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
+                // Validate the trick
+                try {
+                    if (trick->trickNumber != game.trickNumber) {
+                        throw std::runtime_error("Trick number mismatch.");
+                    }
+
+                }
+                catch (std::exception &e) {
+                    Reporter::logWarning(e.what());
+                    game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
+                    return;
+                }
+            } else {
+                Reporter::logError(
+                        "Unexpected message received. Closing player " + ::toString(game.currentPlayer->seat) +
+                        " connection.");
+                game.currentPlayer->buffer.disconnect();
+                players.erase(game.currentPlayer->seat);
+                return; // and re-poll
+            }
+        } else {
             // Check if timeout has been reached
-            Reporter::debug("no messages from the current player..");
-            return;
+            if (time(nullptr) - game.currentPlayer->trickRequestTime > config.timeout_seconds) {
+                Reporter::debug(Color::Red, "Player " + ::toString(game.currentPlayer->seat) + " did not respond in time.");
+                state = [this] { stateSendTrick(); };
+                stateShouldPoll = true;
+                return;
+            }
         }
-
-        auto raw_message = poll_buffers[game.currentPlayerPollIdx].readMessage();
-        auto msg = Parser::parse(raw_message);
-
-//        if (std::dynamic_pointer_cast<Trick>(msg))
     }
 
     void stateStartTrick(int trickNumber) {
         game.trickNumber = trickNumber;
-        game.currentPlayer = game.firstPlayer = game.getStartingPlayer();
+        game.firstPlayerSeat = game.getStartingSeat();
+        game.currentPlayer = &players.at(game.firstPlayerSeat);
         game.cardsOnTable.clear();
 
         state = [this] { stateSendTrick(); };
+        stateShouldPoll = false;
     }
 
     // Assume: game.currentDeal points to the current deal in config.deals
@@ -604,80 +1118,48 @@ private:
     }
     // ----------------------------------------
 
-public:
-    Server (ServerConfig _config): config(std::move(_config)) {
+    public:
+    Server(ServerConfig
+    _config): config(std::move(_config))
+    {
 //        polldfs
         state = [this] { stateStartDeal(config.deals.begin()); };
     }
 
     [[noreturn]] void run() {
+        poll.startAccepting(config.port.value_or(0));
+        game.currentDeal = config.deals.begin();
         while (true) {
-            // after calling this function, pollfds are updated, all 4 players are present without any errors:
+            // after calling this function, fds are updated, all 4 players are present without any errors:
             if (stateShouldPoll)
                 safePoll();
             stateShouldPoll = true;
 
             // call current state function
             state();
-
-
         }
     }
 };
 
 
-void run(int socket) {
-    const int StdIn = 0;
-    const int StdOut = 1;
-    const int Socket = 2;
-    const int Connections = 3;
-    struct pollfd fds[Connections];
-    fds[StdIn].fd = StdIn;
-    fds[StdIn].events = POLLIN;
-    fds[StdOut].fd = StdOut;
-    fds[StdOut].events = 0/*POLLOUT*/; // only when there is something to write
-    fds[Socket].fd = socket;
-    fds[Socket].events = POLLIN | POLLOUT;
-
-    PollBuffer input("\r\n", &fds[StdIn]);
-    Parser parser;
-
-    while (true) {
-        for (auto & fd : fds) fd.revents = 0;
-
-        if (poll(fds, Connections, -1) < 0) {
-            syserr("poll");
-        }
-
-        input.update(); // throws exception on connection error ????
-
-        if (fds[Socket].revents & POLLERR) {
-            throw std::runtime_error("POLLERR");
-        }
-
-        if (fds[Socket].revents & POLLIN) {
-            char buffer[1024];
-            ssize_t size = read(socket, buffer, sizeof(buffer));
-            if (size < 0) {
-                syserr("read");
-            }
-            if (size == 0) {
-                break;
-            }
-            if (write(StdOut, buffer, (size_t) size) < 0) {
-                syserr("write");
-            }
-        }
-
-        if (fds[Socket].revents & POLLHUP) {
-            break;
-        }
-    }
-
-}
-
 int main(int argc, char** argv) {
-    ServerConfig config = ServerConfig::FromArgs(argc, argv);
+//    ServerConfig config = ServerConfig::FromArgs(argc, argv);
+    ServerConfig config {
+            .port = 1234,
+            .deals = {
+                     {
+                            .dealType = DealType::No7AndLastTrick,
+                            .firstSeat = Seat::N,
+                            .cards = {
+                                    {Seat::N, {Card("2C"), Card("3C"), Card("4C"), Card("5C"), Card("6C"), Card("7C"), Card("8C"), Card("9C"), Card("10C"), Card("JC"), Card("QC"), Card("KC"), Card("AC")}},
+                                    {Seat::E, {Card("2D"), Card("3D"), Card("4D"), Card("5D"), Card("6D"), Card("7D"), Card("8D"), Card("9D"), Card("10D"), Card("JD"), Card("QD"), Card("KD"), Card("AD")}},
+                                    {Seat::S, {Card("2H"), Card("3H"), Card("4H"), Card("5H"), Card("6H"), Card("7H"), Card("8H"), Card("9H"), Card("10H"), Card("JH"), Card("QH"), Card("KH"), Card("AH")}},
+                                    {Seat::W, {Card("2S"), Card("3S"), Card("4S"), Card("5S"), Card("6S"), Card("7S"), Card("8S"), Card("9S"), Card("10S"), Card("JS"), Card("QS"), Card("KS"), Card("AS")}}
+                            }
+                    }
+            }
+    };
+
     Server server(config);
     server.run();
 }
