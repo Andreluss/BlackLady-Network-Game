@@ -7,7 +7,6 @@
 #include <iostream>
 #include <memory>
 #include <unordered_map>
-#include <functional>
 #include <cassert>
 
 #include <cerrno>
@@ -21,12 +20,13 @@
 #include <sys/socket.h>
 #include <cinttypes>
 #include <netdb.h>
-#include <cstddef>
 #include <unistd.h>
 #include <csignal>
 #include <fcntl.h>
 #include <ranges>
 #include <regex>
+#include <set>
+#include <unordered_set>
 
 [[noreturn]] void syserr(const char* fmt, ...) {
     va_list fmt_args;
@@ -170,6 +170,7 @@ public:
                   << "] " << message << std::endl;
     }
 };
+
 std::string getCurrentTime() {
     time_t now = time(nullptr);
     struct tm *tm_info = localtime(&now);
@@ -177,6 +178,7 @@ std::string getCurrentTime() {
     strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", tm_info);
     return buffer;
 }
+
 enum class Seat {
     N = 'N',
     E = 'E',
@@ -247,8 +249,22 @@ enum class CardSuit {
 
 struct Card {
 public:
+    Card(const Card& card) {
+        value = card.value;
+        suit = card.suit;
+    }
+
     CardValue value;
     CardSuit suit;
+    // comparator for std::set
+    bool operator<(const Card& other) const {
+        if (value < other.value) {
+            return true;
+        } else if (value == other.value) {
+            return suit < other.suit;
+        }
+        return false;
+    }
     [[nodiscard]] std::string toString() const {
         std::string valueStr;
         switch (value) {
@@ -316,39 +332,38 @@ public:
 };
 
 /*
- * erwer i klient przesyłają następujące komunikaty.
+ * Serwer i klient przesyłają następujące komunikaty.
 
-IAM<miejsce przy stole>\r\n     (for example IAMN\r\n)
-Komunikat wysyłany przez klienta do serwera po nawiązaniu połączenia. Informuje, które miejsce przy stole chce zająć klient. Jeśli klient nie przyśle takiego komunikatu w czasie timeout, serwer zamyka połączenie z tym klientem. W ten sposób serwer traktuje również klienta, który po nawiązaniu połączenia przysłał błędny komunikat.
+    IAM<miejsce przy stole>\r\n     (for example IAMN\r\n)
+    Komunikat wysyłany przez klienta do serwera po nawiązaniu połączenia. Informuje, które miejsce przy stole chce zająć klient. Jeśli klient nie przyśle takiego komunikatu w czasie timeout, serwer zamyka połączenie z tym klientem. W ten sposób serwer traktuje również klienta, który po nawiązaniu połączenia przysłał błędny komunikat.
 
-Busy<lista zajętych miejsc przy stole>\r\n     (for example BusyNS\r\n)
-Komunikat wysyłany przez serwer do klienta, jeśli wybrane miejsce przy stole jest już zajęte. Jednocześnie informuje go, które miejsca przy stole są zajęte. Po wysłaniu tego komunikatu serwer zamyka połączenie z klientem. W ten sposób serwer traktuje również klienta, który próbuje podłączyć się do trwającej rozgrywki.
+    Busy<lista zajętych miejsc przy stole>\r\n     (for example BusyNS\r\n)
+    Komunikat wysyłany przez serwer do klienta, jeśli wybrane miejsce przy stole jest już zajęte. Jednocześnie informuje go, które miejsca przy stole są zajęte. Po wysłaniu tego komunikatu serwer zamyka połączenie z klientem. W ten sposób serwer traktuje również klienta, który próbuje podłączyć się do trwającej rozgrywki.
 
-DEAL<typ rozdania><miejsce przy stole klienta wychodzącego jako pierwszy w rozdaniu><lista kart>\r\n
-Komunikat wysyłany przez serwer do klientów po zebraniu się czterech klientów. Informuje o rozpoczęciu rozdania. Lista zawiera 13 kart, które klient dostaje w tym rozdaniu.
+    DEAL<typ rozdania><miejsce przy stole klienta wychodzącego jako pierwszy w rozdaniu><lista kart>\r\n
+    Komunikat wysyłany przez serwer do klientów po zebraniu się czterech klientów. Informuje o rozpoczęciu rozdania. Lista zawiera 13 kart, które klient dostaje w tym rozdaniu.
 
-TRICK<numer lewy><lista kart>\r\n    (for example TRICK1\r\n)
-Komunikat wysyłany przez serwer do klienta z prośbą o położenie karty na stole. Lista kart zawiera od zera do trzech kart aktualnie leżących na stole. Jeśli klient nie odpowie w czasie timeout, to serwer ponawia prośbę. Komunikat wysyłany przez klienta do serwera z kartą, którą klient kładzie na stole (lista kart zawiera wtedy jedną kartę).
+    TRICK<numer lewy><lista kart>\r\n    (for example TRICK1\r\n)
+    Komunikat wysyłany przez serwer do klienta z prośbą o położenie karty na stole. Lista kart zawiera od zera do trzech kart aktualnie leżących na stole. Jeśli klient nie odpowie w czasie timeout, to serwer ponawia prośbę. Komunikat wysyłany przez klienta do serwera z kartą, którą klient kładzie na stole (lista kart zawiera wtedy jedną kartę).
 
-WRONG<numer lewy>\r\n
-Komunikat wysyłany przez serwer do klienta, który przysłał błędny komunikat w odpowiedzi na komunikat TRICK. Wysyłany również wtedy, gdy klient próbuje położyć kartę na stole nieproszony o to. Zawartość błędnego komunikatu jest ignorowana przez serwer.
+    WRONG<numer lewy>\r\n
+    Komunikat wysyłany przez serwer do klienta, który przysłał błędny komunikat w odpowiedzi na komunikat TRICK. Wysyłany również wtedy, gdy klient próbuje położyć kartę na stole nieproszony o to. Zawartość błędnego komunikatu jest ignorowana przez serwer.
 
-TAKEN<numer lewy><lista kart><miejsce przy stole klienta biorącego lewę>\r\n
-Komunikat wysyłany przez serwer do klientów. Informuje, który z klientów wziął lewę. Lista kart zawiera cztery karty składające się na lewę w kolejności, w jakiej zostały położone na stole.
+    TAKEN<numer lewy><lista kart><miejsce przy stole klienta biorącego lewę>\r\n
+    Komunikat wysyłany przez serwer do klientów. Informuje, który z klientów wziął lewę. Lista kart zawiera cztery karty składające się na lewę w kolejności, w jakiej zostały położone na stole.
 
-SCORE<miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów>\r\n
-Komunikat wysyłany przez serwer do klientów po zakończeniu rozdania. Informuje o punktacji w tym rozdaniu.
+    SCORE<miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów>\r\n
+    Komunikat wysyłany przez serwer do klientów po zakończeniu rozdania. Informuje o punktacji w tym rozdaniu.
 
-TOTAL<miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów>\r\n
-Komunikat wysyłany przez serwer do klientów po zakończeniu rozdania. Informuje o łącznej punktacji w rozgrywce.
+    TOTAL<miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów>\r\n
+    Komunikat wysyłany przez serwer do klientów po zakończeniu rozdania. Informuje o łącznej punktacji w rozgrywce.
  */
 
 class Msg {
 public:
-    virtual std::string toString() const = 0;
-    virtual ~Msg() = default;
+    [[nodiscard]] virtual std::string toString() const = 0;
     // write a auto conversion to std::string
-     explicit operator std::string() {
+     explicit operator std::string() const {
         return toString();
     }
 };
@@ -357,7 +372,7 @@ class IAm : public Msg {
 public:
     Seat seat;
     explicit IAm(Seat seat) : seat(seat) {}
-    std::string toString() const override {
+    [[nodiscard]] std::string toString() const override {
         return "IAM" + ::toString(seat) + "\r\n";
     }
 };
@@ -366,7 +381,7 @@ class Busy : public Msg {
     std::vector<Seat> busy_seats;
 public:
     explicit Busy(std::vector<Seat> busy_seats) : busy_seats(std::move(busy_seats)) {}
-    std::string toString() const override {
+    [[nodiscard]] std::string toString() const override {
         std::string result = "BUSY";
         for (const auto& seat: busy_seats) {
             result += ::toString(seat);
@@ -382,7 +397,7 @@ class Deal : public Msg {
     std::vector<Card> cards;
 public:
     Deal(DealType dealType, Seat firstSeat, std::vector<Card> cards) : dealType(dealType), firstSeat(firstSeat), cards(std::move(cards)) {}
-    std::string toString() const override {
+    [[nodiscard]] std::string toString() const override {
         std::string result = "DEAL" + std::to_string(static_cast<int>(dealType)) + ::toString(firstSeat);
         for (const auto& card: cards) {
             result += card.toString();
@@ -400,7 +415,7 @@ public:
     Trick(int trickNumber, std::vector<Card> cardsOnTable) : trickNumber(trickNumber), cardsOnTable(std::move(cardsOnTable)) {
         assert(trickNumber >= FirstTrickNumber && trickNumber <= 13);
     }
-    std::string toString() const override {
+    [[nodiscard]] std::string toString() const override {
         std::string result = "TRICK" + std::to_string(trickNumber);
         for (const auto & card : cardsOnTable) {
             result += card.toString();
@@ -475,8 +490,8 @@ public:
         try {
             std::regex IAM_regex(R"(^IAM([NESW])\r\n$)");
             std::regex BUSY_regex(R"(^BUSY([NESW]+)\r\n$)");
-            std::regex DEAL_regex(R"(^DEAL([1-7])([NESW])((10|[23456789JQKA])[CDHS]){13}\r\n$)");
-            std::regex TRICK_regex(R"(^TRICK([1-9]|1[0-3])((10|[23456789JQKA])[CDHS]){0,3}\r\n$)");
+            std::regex DEAL_regex(R"(^DEAL([1-7])([NESW])(((10|[23456789JQKA])[CDHS]){13})\r\n$)");
+            std::regex TRICK_regex(R"(^TRICK([1-9]|1[0-3])(((10|[23456789JQKA])[CDHS]){0,3})\r\n$)");
             std::regex WRONG_regex(R"(^WRONG([1-9]|1[0-3])\r\n$)");
             std::regex TAKEN_regex(R"(^TAKEN([1-9]|1[0-3])((10|[23456789JQKA])[CDHS]){4}([NESW])\r\n$)");
             std::regex SCORE_regex(R"(^SCORE([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)\r\n$)");
@@ -490,6 +505,12 @@ public:
                 std::vector<Seat> busySeats;
                 for (char seatChar: seatsStr) {
                     busySeats.push_back(Seat(seatChar));
+                }
+                // ensure that there are no repeated seats
+                std::set<Seat> busySeatsSet(busySeats.begin(), busySeats.end());
+                if (busySeats.size() != busySeatsSet.size()) {
+                    Reporter::error("Repeated seats in BUSY message");
+                    return nullptr;
                 }
                 return std::make_shared<Busy>(busySeats);
             } else if (std::regex_match(message, match, DEAL_regex)) {
@@ -505,6 +526,12 @@ public:
                     std::string cardStr = card_match.str();
                     cards.push_back(Card(cardStr));
                     ++it;
+                }
+                // ensure that there are no repeated cards
+                std::set<Card> cardsSet(cards.begin(), cards.end());
+                if (cards.size() != cardsSet.size()) {
+                    Reporter::error("Repeated cards in DEAL message");
+                    return nullptr;
                 }
                 return std::make_shared<Deal>(dealType, firstSeat, cards);
             } else if (std::regex_match(message, match, TRICK_regex)) {
@@ -565,6 +592,104 @@ public:
     }
 };
 
+template<class T>
+void ensureTypeAndStringValue(const std::shared_ptr<Msg>& msg, const std::string& expectedStr) {
+    auto castedMsg = std::dynamic_pointer_cast<T>(msg);
+    if (castedMsg == nullptr) {
+        Reporter::error("Invalid message type");
+        assert(false);
+    }
+    std::cerr << "Expected: " << expectedStr << "     Got: " << castedMsg->toString() << std::endl;
+    if (castedMsg->toString() != expectedStr) {
+        Reporter::error("Invalid message value");
+        throw std::invalid_argument("Invalid message value");
+    }
+}
+
+template<class T>
+void ensureType(const std::shared_ptr<Msg>& msg) {
+    auto castedMsg = std::dynamic_pointer_cast<T>(msg);
+    if (castedMsg == nullptr) {
+        Reporter::error("Invalid message type");
+        assert(false);
+    }
+}
+
+void testParser() {
+    std::string message = "IAMN\r\n";
+    ensureTypeAndStringValue<IAm>(Parser::parse(message), message);
+
+    message = "BUSYNS\r\n";
+    ensureTypeAndStringValue<Busy>(Parser::parse(message), message);
+
+    // busy with multiple repeated seats
+    message = "BUSYNNSS\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // deal with 13 cards
+    message = "DEAL3E" "2C3C4C5C6C7C8C9C10C" "JC" "10H" "KS" "KD" "\r\n";
+    ensureTypeAndStringValue<Deal>(Parser::parse(message), message);
+
+    // deal with too few cards
+    message = "DEAL3E" "2C3C4C5C6C7C8C9C10C" "JC" "10H" "\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // deal with 13 cards, but with repetitions
+    message = "DEAL3E" "2C3C4C5C6C7C8C9C10C" "KD" "AS" "KD" "KS" "\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // trick with 3 cards
+    message = "TRICK1" "2C3C4C\r\n";
+    ensureTypeAndStringValue<Trick>(Parser::parse(message), message);
+
+    // trick with 1 card
+    message = "TRICK1" "10C\r\n";
+    ensureTypeAndStringValue<Trick>(Parser::parse(message), message);
+
+    // trick with 0 cards
+    message = "TRICK1\r\n";
+    ensureTypeAndStringValue<Trick>(Parser::parse(message), message);
+
+    // trick with too many cards
+    message = "TRICK1" "2C3C4C5C6C\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // trick with non-existent card value
+    message = "TRICK1" "2C3C4C5C6X\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // trick with non-existing trick number
+    message = "TRICK0" "2C3C4C5C6C\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // wrong with existing trick number
+    message = "WRONG1\r\n";
+    ensureType<Wrong>(Parser::parse(message));
+
+    // score with correct values
+    message = "SCOREN0E0S0W0\r\n";
+    ensureType<Score>(Parser::parse(message));
+
+    // score with values
+    message = "SCOREN0E0S0W1\r\n";
+    ensureType<Score>(Parser::parse(message));
+
+    // total with correct values
+    message = "TOTALN0E42S0W999\r\n";
+    ensureType<Total>(Parser::parse(message));
+
+    // IAM with wrong seat
+    message = "IAMX\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // BUSY with wrong seat
+    message = "BUSYX\r\n";
+    assert(Parser::parse(message) == nullptr);
+
+    // TRICK with wrong card
+    message = "TRICK3" "10X" "\r\n";
+    assert(Parser::parse(message) == nullptr);
+}
 
 struct DealConfig {
     DealType dealType;
@@ -1143,6 +1268,8 @@ private:
 
 
 int main(int argc, char** argv) {
+    testParser();
+
 //    ServerConfig config = ServerConfig::FromArgs(argc, argv);
     ServerConfig config {
             .port = 1234,
