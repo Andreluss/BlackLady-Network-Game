@@ -139,6 +139,18 @@ void install_signal_handler(int signal, void (*handler)(int), int flags) {
     }
 }
 
+void install_sigpipe_handler() {
+    struct sigaction action{};
+    action.sa_handler = SIG_IGN; // Set handler to SIG_IGN to ignore the signal
+    action.sa_flags = 0;
+    if (sigemptyset(&action.sa_mask) == -1) {
+        syserr("Failed to set SIGPIPE handler");
+    }
+    if (sigaction(SIGPIPE, &action, nullptr) == -1) {
+        syserr("Failed to set SIGPIPE handler");
+    }
+}
+
 struct Color {
     static constexpr const char* Red = "\033[31m";
     static constexpr const char* Green = "\033[32m";
@@ -156,6 +168,9 @@ public:
     }
     static void error(std::string message) {
         std::cerr << "[------------]" << Color::Red << message << Color::Reset << std::endl;
+    }
+    static void log(std::string message) {
+        std::cerr << Color::Green << message << Color::Reset << std::endl;
     }
     static void logError(std::string message) {
         std::cerr << Color::Red << "[Error] " << Color::Reset << message << std::endl;
@@ -764,7 +779,7 @@ private:
     }
 
 public:
-     /*explicit*/ PollBuffer(struct pollfd *pollfd, std::string msg_separator = "\r\n") {
+     explicit PollBuffer(struct pollfd *pollfd, std::string msg_separator = "\r\n") {
         buffer_in_msg_separator = std::move(msg_separator);
         this->pollfd = pollfd;
         if (pollfd != nullptr && pollfd->fd != -1) {
@@ -774,33 +789,43 @@ public:
     PollBuffer(): PollBuffer(nullptr) {}
 
 
-
-
     // function for making sure the client is disconnected and clearing its players (it's called after a poll error)
     void disconnect() {
-        // close the socket
-        close(pollfd->fd);
-        // clear the players
+        // clear the buffers
         buffer_in.clear();
         buffer_out.clear();
-        // clear the pollfd structure
-        pollfd->fd = -1;
-        pollfd->events = 0;
-        pollfd->revents = 0;
+
+        if (pollfd != nullptr) {
+            // close the socket
+            if (pollfd->fd != -1)
+                close(pollfd->fd);
+
+            // clear the pollfd structure
+            pollfd->fd = -1;
+            pollfd->events = 0;
+            pollfd->revents = 0;
+        }
     }
     // function called when settings the PollBuffer object for a new client that has just connected (and it's descriptor is in the fds array)
     void connect(struct pollfd* _pollfd) {
-        // set the pollfd structure
-        this->pollfd = _pollfd;
-        // clear the players
+        // clear the buffers
         buffer_in.clear();
         buffer_out.clear();
+
+        // set the pollfd structure
+        this->pollfd = _pollfd;
+        assert(pollfd != nullptr);
+        assert(pollfd->fd != -1);
 
         // for now, set the pollfd events to POLLIN *only*
         pollfd->events = POLLIN;
     }
 
     void update() {
+        if (!isConnected()) {
+            Reporter::error("Tried to update a disconnected client.");
+            return;
+        }
         // check if any error occurred and if so, the buffer is broken and the client should be disconnected and his data cleared
         if (updateErrors()) {
             disconnect();
@@ -810,7 +835,7 @@ public:
         updatePollOut();
         Reporter::debug(Color::Yellow, "Buffer in: " + buffer_in);
     }
-    bool hasError() const {
+    [[nodiscard]] bool hasError() const {
         return error;
     }
     bool hasMessage() {
@@ -821,8 +846,8 @@ public:
     }
     std::string readMessage() {
         assert(hasMessage());
-        auto pos = buffer_in.find(buffer_in_msg_separator);
         // return the message including the separator and remove it from the buffer
+        auto pos = buffer_in.find(buffer_in_msg_separator);
         std::string message = buffer_in.substr(0, pos + buffer_in_msg_separator.size());
         buffer_in.erase(0, pos + buffer_in_msg_separator.size());
 
@@ -836,8 +861,7 @@ public:
     void writeMessage(const std::string& message) {
         assert(!message.empty());
         buffer_out += message;
-        // add the POLLOUT flag
-        pollfd->events |= POLLOUT;
+        pollfd->events |= POLLOUT; // add the POLLOUT flag
 
         std::string localIP, remoteIP; int localPort, remotePort;
         getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
@@ -863,6 +887,7 @@ public:
 
     static ServerConfig FromArgs(int argc, char** argv) {
         ServerConfig config;
+        throw std::runtime_error("Not implemented");
         return config;
     }
 
@@ -871,29 +896,25 @@ public:
 struct PlayerStats {
     int points_deal = 0;
     int points_total = 0;
-    // .
+    //
 };
 
 class Server {
 private:
     ServerConfig config;
 
-
-
     struct Polling {
-        static constexpr int Connections = 6;
-        struct pollfd fds[Connections]{};
+        static constexpr int Connections = 32;
+        // intialize the pollfd array with values {.fd = -1, .events = 0, .revents = 0}
+        std::array<struct pollfd, Connections> fds{};
         const int fdAcceptIdx = 0;
-
-//        const int fdPlayersIdx[4] = {0, 1, 2, 3};
-        explicit Polling() {
-            for (auto &fd: fds) {
+        Polling() {
+            for (auto& fd: fds) {
                 fd.fd = -1;
                 fd.events = 0;
                 fd.revents = 0;
             }
         }
-
         struct Candidate {
             PollBuffer buffer;
             enum State {
@@ -904,6 +925,8 @@ private:
 
             explicit Candidate(PollBuffer buffer, State state = State::WaitingForIAM)
                     : buffer(std::move(buffer)), state(state), connectionTime(time(nullptr)) {}
+
+            explicit Candidate(struct pollfd* pollfd): Candidate(PollBuffer(pollfd)){}
         };
 
         std::vector<Candidate> candidates{}; // in/out buffer wrappers for candidate players (without a seat yet)
@@ -928,7 +951,6 @@ private:
                 syserr("bind");
             }
 
-
             const int QueueLength = 4;
             if (listen(fds[fdAcceptIdx].fd, QueueLength) < 0) {
                 syserr("listen");
@@ -938,8 +960,7 @@ private:
             if (getsockname(fds[fdAcceptIdx].fd, (struct sockaddr *) &server_address, &length) < 0) {
                 syserr("getsockname");
             }
-            Reporter::debug(Color::Green,
-                            "Server is listening on port " + std::to_string(ntohs(server_address.sin6_port)));
+            Reporter::debug(Color::Green, "Server is listening on port " + std::to_string(ntohs(server_address.sin6_port)));
 
             fds[fdAcceptIdx].events = POLLIN;
             fds[fdAcceptIdx].revents = 0;
@@ -957,11 +978,8 @@ private:
             close(fds[fdAcceptIdx].fd);
             fds[fdAcceptIdx].fd = -1;
         }
-
-        
-
     } poll;
-    
+
     std::vector<Seat> getTakenSeats() {
         std::vector<Seat> takenSeats;
         for (const auto &[seat, player]: players) {
@@ -970,7 +988,7 @@ private:
         }
         return takenSeats;
     }
-    
+
     struct Player {
         PollBuffer buffer;
         time_t trickRequestTime{};
@@ -981,6 +999,10 @@ private:
         [[nodiscard]] bool isConnected() const {
             return buffer.isConnected();
         }
+
+        void connect(PollBuffer new_buffer) {
+            this->buffer = std::move(new_buffer);
+        }
     };
 
     std::unordered_map<Seat, Player> players{
@@ -990,147 +1012,265 @@ private:
             {Seat::W, Player(Seat::W, PollBuffer())}
     }; // in/out buffer wrappers for players (with a seat)
 
-    
-    void safePoll() {
-        while (true) {
-            // ---- run poll and update the player poll players ----
-            // reset revents
-            for (auto &fd: poll.fds) {
-                fd.revents = 0;
-            }
-            ::poll(poll.fds, poll.Connections, config.timeout_seconds * 1000 / 10);
-            for (auto &[seat, player]: players) {
-                if (player.buffer.isConnected())
-                    player.buffer.update();
-            }
-            for (auto &candidate: poll.candidates) {
-                candidate.buffer.update();
-            }
 
-            // (1) update disconnections and remove disconnected players
-            for (auto &[seat, player]: players) {
+private:
+    void _pollUpdate() {
+        // ----------- reset revents, run poll and update the player poll players ------------
+        for (auto &fd: poll.fds) {
+            fd.revents = 0;
+        }
+        ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
+        for (auto &[seat, player]: players) {
+            if (player.buffer.isConnected())
+                player.buffer.update();
+        }
+        for (auto &candidate: poll.candidates) {
+            candidate.buffer.update();
+        }
+    }
+
+    void _updateDisconnections() {
+        // (1) update disconnections and remove disconnected players or candidates
+        for (auto &[seat, player]: players) {
+            if (player.isConnected()) {
                 if (player.buffer.hasError()) {
                     // disconnect the player
                     player.buffer.disconnect();
                     Reporter::debug(Color::Red, "Player " + ::toString(seat) + " disconnected.");
-
-                    // remove the player from the players
-                    players.erase(seat);
                 }
             }
+        }
 
-            // (2) check if there are any new connections
-            if (poll.fds[poll.fdAcceptIdx].revents & POLLIN) {
-                struct sockaddr_in client_address{};
-                socklen_t client_address_len = sizeof(client_address);
-                int client_fd = accept(poll.fds[poll.fdAcceptIdx].fd, (struct sockaddr *) &client_address,
-                                       &client_address_len);
-                if (client_fd < 0) {
-                    syserr("accept");
-                }
+        for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
+            if (candidate->buffer.hasError()) {
+                // disconnect the candidate
+                candidate->buffer.disconnect();
+                Reporter::debug(Color::Red, "Candidate disconnected due to error.");
+                // remove the candidate
+                candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
+            } else {
+                candidate++;
+            }
+        }
+    }
 
-                // Set to nonblocking mode.
-                if (fcntl(client_fd, F_SETFL, O_NONBLOCK)) {
-                    syserr("fcntl");
-                }
-
-                // find the first free pollfd for candidates and set it
-                bool accepted = false;
-                for (int candidateFdIdx: std::views::iota(0, poll.Connections)) {
-                    if (poll.fds[candidateFdIdx].fd == -1) {
-                        poll.fds[candidateFdIdx].fd = client_fd;
-                        Polling::Candidate candidate(PollBuffer(&poll.fds[candidateFdIdx]));
-                        poll.candidates.push_back(candidate);
-                        Reporter::debug(Color::Green, "New candidate connected.");
-                        accepted = true;
-                        break;
-                    }
-                }
-
-                // if no free pollfd was found, close the connection
-                if (!accepted) {
-                    Reporter::error("Should not happen - no free pollfd for candidate.");
-                    close(client_fd);
-                }
+    void _updateNewConnections() {
+        if (poll.fds[poll.fdAcceptIdx].revents & POLLIN) {
+            struct sockaddr_in client_address{};
+            socklen_t client_address_len = sizeof(client_address);
+            int client_fd = accept(poll.fds[poll.fdAcceptIdx].fd, (struct sockaddr *) &client_address,
+                                   &client_address_len);
+            if (client_fd < 0) {
+                syserr("accept");
             }
 
-            // (3) check if there are any new IAM messages from candidates
-            for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
-                auto &[buffer, candidate_state, connectionTime] = *candidate;
+            // Set to nonblocking mode.
+            if (fcntl(client_fd, F_SETFL, O_NONBLOCK)) {
+                syserr("fcntl");
+            }
 
-                if (candidate->buffer.hasError()) {
-                    // disconnect the candidate
-                    candidate->buffer.disconnect();
-                    Reporter::debug(Color::Red, "Candidate disconnected due to error.");
+            // find the first free pollfd
+            for (auto& pollfd: poll.fds) {
+                if (pollfd.fd == -1) {
+                    pollfd.fd = client_fd;
+                    pollfd.events = POLLIN;
 
-                    // remove the player from the players
-                    candidate = poll.candidates.erase(
-                            candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
+                    auto new_candidate = Polling::Candidate(&pollfd);
+                    poll.candidates.push_back(new_candidate);
+
+                    Reporter::log("New candidate connected.");
+                    return;
+                }
+            }
+            // or close the connection
+            Reporter::error("Is this a DDoS attack? No free pollfd for candidate.");
+            close(client_fd);
+        }
+    }
+
+    void acceptCandidateAsPlayer(Polling::Candidate& candidate, Seat seat) {
+        assert(!players.at(seat).isConnected());
+        auto& new_player = players.at(seat);
+        new_player.connect(std::move(candidate.buffer));
+
+        // Send the whole deal history to the new player.
+        new_player.buffer.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat, game.currentDeal->cards[seat]));
+        for (auto& taken: game.takenHistory) {
+            new_player.buffer.writeMessage(taken);
+        }
+
+        Reporter::debug(Color::Green, "Player " + ::toString(seat) + " connected and updated with history of (" + std::to_string(game.takenHistory.size()) + ") taken cards.");
+        assert(players.at(seat).isConnected());
+    }
+
+    bool _processCandidateWaitingForIAM(Polling::Candidate& candidate) {
+        assert(candidate.state == Polling::Candidate::State::WaitingForIAM);
+
+        // Check timeout.
+        if (time(nullptr) - candidate.connectionTime > config.timeout_seconds) {
+            candidate.buffer.disconnect();
+            Reporter::debug(Color::Red, "Candidate disconnected due to timeout.");
+            return true;
+        }
+
+        // Check if the candidate has a message.
+        if (!candidate.buffer.hasMessage()) {
+            return false; // nothing to do yet
+        }
+
+        // Syntax check: IAM message.
+        std::string raw_msg = candidate.buffer.readMessage();
+        auto msg = Parser::parse(raw_msg);
+        auto iam = std::dynamic_pointer_cast<IAm>(msg);
+        if (iam == nullptr) {
+            candidate.buffer.disconnect();
+            Reporter::debug(Color::Red, "Candidate disconnected due to incorrect message (expected IAM, got " + raw_msg + ").");
+            return true;
+        }
+
+        // Semantic check: seat is not taken.
+        if (players.at(iam->seat).isConnected()) {
+            candidate.buffer.writeMessage(Busy(getTakenSeats()));
+            candidate.state = Polling::Candidate::State::Rejecting;
+            return false; // we cannot remove the candidate yet, but we changed its state
+        }
+
+        // Accept the candidate.
+        acceptCandidateAsPlayer(candidate, iam->seat);
+        return true; // very important: remove the candidate to prevent double processing
+    }
+
+    // Updates the candidate messages and
+    // - returns true iff the candidate should be removed (for example due to timeout, wrong message, disconnection etc.)
+    bool _processCandidate(Polling::Candidate& candidate, int timeout_seconds) {
+        assert(candidate.buffer.hasError() == false);
+        assert(candidate.buffer.isConnected() == true);
+
+        if (candidate.state == Polling::Candidate::State::WaitingForIAM) {
+            return _processCandidateWaitingForIAM(candidate);
+        }
+        else if (candidate.state == Polling::Candidate::State::Rejecting) {
+            // only if it has finished writing the rejection message
+            if (!candidate.buffer.isWriting()) {
+                candidate.buffer.disconnect();
+                Reporter::debug(Color::Red, "Candidate successfully rejected and disconnected.");
+                return true;
+            }
+        }
+        else {
+            Reporter::error("Invalid candidate state.");
+        }
+        return false;
+    }
+
+    void _updateCandidateMessages() {
+        for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
+            if (_processCandidate(*candidate, config.timeout_seconds)) {
+                // remove the candidate
+                candidate = poll.candidates.erase(candidate);
+            } else {
+                ++candidate;
+            }
+        }
+    }
+
+    void _updateCandidateMessagesOld() {
+        for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
+            auto &[buffer, candidate_state, connectionTime] = *candidate;
+
+            if (candidate->buffer.hasError()) {
+                // disconnect the candidate
+                candidate->buffer.disconnect();
+                Reporter::debug(Color::Red, "Candidate disconnected due to error.");
+
+                // remove the player from the players
+                candidate = poll.candidates.erase(
+                        candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
+                continue;
+            }
+
+            if (candidate->state == Polling::Candidate::State::WaitingForIAM) {
+                // check timeout todo check: maybe we should check hasMessage first
+                if (time(nullptr) - candidate->connectionTime >
+                    config.timeout_seconds) { // higher timeout accuracy? todo check
+                    buffer.disconnect();
+                    Reporter::debug(Color::Red, "Candidate disconnected due to timeout.");
+
+                    // remove the candidate
+                    candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
                     continue;
                 }
 
-                if (candidate->state == Polling::Candidate::State::WaitingForIAM) {
-                    // check timeout todo check: maybe we should check hasMessage first
-                    if (time(nullptr) - candidate->connectionTime >
-                        config.timeout_seconds) { // higher timeout accuracy? todo check
+
+                if (candidate->buffer.hasMessage()) {
+                    auto msg = Parser::parse(candidate->buffer.readMessage());
+                    if (auto iam = std::dynamic_pointer_cast<IAm>(msg)) {
+                        // (a) first check, if the seat is not already taken
+                        if (players.at(iam->seat).isConnected()) {
+                            buffer.writeMessage(Busy(getTakenSeats()));
+                            candidate->state = Polling::Candidate::State::Rejecting; // we cannot disconnect candidate yet
+                        } else {
+                            // (b) if the seat is free, accept
+                            // change: candidate -> player
+                            players.at(iam->seat).buffer = (buffer);
+                            poll.candidates.erase(candidate);
+
+                            // CAUTION: send the TAKEN history from the current deal only
+                            auto &buf = players.at(iam->seat).buffer;
+                            buf.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat,
+                                                  game.currentDeal->cards[iam->seat]));
+                            for (auto &taken: game.takenHistory) {
+                                buf.writeMessage(taken);
+                            }
+                            Reporter::debug(Color::Green,
+                                            "Candidate accepted, connected and updated with history of (" +
+                                            std::to_string(game.takenHistory.size()) + ") taken cards.");
+                        }
+                    } else {
+                        // (c) if the message is not IAM, close immediately
                         buffer.disconnect();
-                        Reporter::debug(Color::Red, "Candidate disconnected due to timeout.");
+                        Reporter::debug(Color::Red, "Candidate disconnected due to wrong message.");
 
                         // remove the candidate
                         candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
                         continue;
                     }
-
-
-                    if (candidate->buffer.hasMessage()) {
-                        auto msg = Parser::parse(candidate->buffer.readMessage());
-                        if (auto iam = std::dynamic_pointer_cast<IAm>(msg)) {
-                            // (a) first check, if the seat is not already taken
-                            if (players.at(iam->seat).isConnected()) {
-                                buffer.writeMessage(Busy(getTakenSeats()));
-                                candidate->state = Polling::Candidate::State::Rejecting; // we cannot disconnect candidate yet
-                            } else {
-                                // (b) if the seat is free, accept
-                                // change: candidate -> player
-                                players.at(iam->seat).buffer = (buffer);
-                                poll.candidates.erase(candidate);
-
-                                // CAUTION: send the TAKEN history from the current deal only
-                                auto &buf = players.at(iam->seat).buffer;
-                                buf.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat,
-                                                      game.currentDeal->cards[iam->seat]));
-                                for (auto &taken: game.takenHistory) {
-                                    buf.writeMessage(taken);
-                                }
-                                Reporter::debug(Color::Green,
-                                                "Candidate accepted, connected and updated with history of (" +
-                                                std::to_string(game.takenHistory.size()) + ") taken cards.");
-                            }
-                        } else {
-                            // (c) if the message is not IAM, close immediately
-                            buffer.disconnect();
-                            Reporter::debug(Color::Red, "Candidate disconnected due to wrong message.");
-
-                            // remove the candidate
-                            candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
-                            continue;
-                        }
-                    }
-                } else if (candidate_state == Polling::Candidate::State::Rejecting) {
-                    if (buffer.isWriting()) {
-                        // wait for the message to be sent
-                    } else {
-                        // disconnect and remove the candidate
-                        buffer.disconnect();
-                        candidate = poll.candidates.erase(candidate);
-                        Reporter::debug(Color::Red, "Candidate successfully rejected and disconnected.");
-                        continue;
-                    }
                 }
-                candidate++;
             }
+            else if (candidate_state == Polling::Candidate::State::Rejecting) {
+                if (buffer.isWriting()) {
+                    // wait for the message to be sent
+                } else {
+                    // disconnect and remove the candidate
+                    buffer.disconnect();
+                    candidate = poll.candidates.erase(candidate);
+                    Reporter::debug(Color::Red, "Candidate successfully rejected and disconnected.");
+                    continue;
+                }
+            }
+            candidate++;
+        }
+    }
 
+    void safePoll() {
+        while (true) {
+            // ----------- reset revents, run poll and update the player poll players ------------
+            _pollUpdate();
 
+            // (1) update disconnections and remove disconnected players
+            _updateDisconnections();
+
+            // (2) check if there are any new connections
+            _updateNewConnections();
+
+            // (3) check if there are any new IAM messages from candidates
+            _updateCandidateMessages();
+
+            // return if all players are connected
+            if (std::all_of(players.begin(), players.end(), [](const auto &p) { return p.second.isConnected(); })) {
+                Reporter::debug(Color::Green, "Safe poll finished. All players connected!");
+                return;
+            }
         }
     }
 
@@ -1171,6 +1311,7 @@ private:
 
     void stateSendTrick() {
         game.currentPlayer->buffer.writeMessage(Trick(game.trickNumber, game.cardsOnTable));
+        game.currentPlayer->trickRequestTime = time(nullptr);
         // report
         state = [this] { stateWaitForTrick(); };
     }
@@ -1268,6 +1409,7 @@ private:
 
 
 int main(int argc, char** argv) {
+    install_sigpipe_handler();
     testParser();
 
 //    ServerConfig config = ServerConfig::FromArgs(argc, argv);
