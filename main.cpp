@@ -779,14 +779,13 @@ private:
     }
 
 public:
-     explicit PollBuffer(struct pollfd *pollfd, std::string msg_separator = "\r\n") {
+     explicit PollBuffer(struct pollfd *pollfd = nullptr, std::string msg_separator = "\r\n") {
         buffer_in_msg_separator = std::move(msg_separator);
         this->pollfd = pollfd;
         if (pollfd != nullptr && pollfd->fd != -1) {
             pollfd->events = POLLIN;
         }
     }
-    PollBuffer(): PollBuffer(nullptr) {}
 
 
     // function for making sure the client is disconnected and clearing its players (it's called after a poll error)
@@ -804,6 +803,8 @@ public:
             pollfd->fd = -1;
             pollfd->events = 0;
             pollfd->revents = 0;
+
+            pollfd = nullptr; // drop the pointer
         }
     }
     // function called when settings the PollBuffer object for a new client that has just connected (and it's descriptor is in the fds array)
@@ -833,7 +834,7 @@ public:
         }
         updatePollIn();
         updatePollOut();
-        Reporter::debug(Color::Yellow, "Buffer in: " + buffer_in);
+//        Reporter::debug(Color::Yellow, "Buffer in: " + buffer_in);
     }
     [[nodiscard]] bool hasError() const {
         return error;
