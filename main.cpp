@@ -186,12 +186,15 @@ public:
     }
 };
 
+// Write a function that returns the string with time in such a format: 2024-04-25T18:21:00.010 (with parts of seconds)
 std::string getCurrentTime() {
-    time_t now = time(nullptr);
-    struct tm *tm_info = localtime(&now);
-    char buffer[26];
-    strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", tm_info);
-    return buffer;
+    struct timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    char timeStr[30];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%dT%H:%M:%S", localtime(&ts.tv_sec));
+    char msStr[5];
+    sprintf(msStr, ".%03ld", ts.tv_nsec / 1000000);
+    return std::string(timeStr) + msStr;
 }
 
 enum class Seat {
@@ -230,10 +233,10 @@ enum class DealType {
     //nie brać króla kier, za jego wzięcie dostaje się 18 punktów;
     //nie brać siódmej i ostatniej lewy, za wzięcie każdej z tych lew dostaje się po 10 punktów;
     //rozbójnik, punkty dostaje się za wszystko wymienione powyżej.
-    NoTrumps = 1,
+    NoTricks = 1,
     NoHearts = 2,
     NoQueens = 3,
-    NoMen = 4,
+    NoKingsJacks = 4,
     NoKingOfHearts = 5,
     No7AndLastTrick = 6,
     Robber = 7
@@ -271,7 +274,7 @@ public:
 
     CardValue value;
     CardSuit suit;
-    // comparator for std::set
+    // comparator, preserving the order of (value, suit)
     bool operator<(const Card& other) const {
         if (value < other.value) {
             return true;
@@ -280,6 +283,8 @@ public:
         }
         return false;
     }
+    bool operator==(const Card& other) const = default;
+
     [[nodiscard]] std::string toString() const {
         std::string valueStr;
         switch (value) {
@@ -424,15 +429,16 @@ public:
 
 class Trick : public Msg {
 public:
-    std::vector<Card> cardsOnTable;
+    std::vector<Card> cards;
     int trickNumber; // 1-13
     static constexpr int FirstTrickNumber = 1;
-    Trick(int trickNumber, std::vector<Card> cardsOnTable) : trickNumber(trickNumber), cardsOnTable(std::move(cardsOnTable)) {
+    static constexpr int LastTrickNumber = 13;
+    Trick(int trickNumber, std::vector<Card> cardsOnTable) : trickNumber(trickNumber), cards(std::move(cardsOnTable)) {
         assert(trickNumber >= FirstTrickNumber && trickNumber <= 13);
     }
     [[nodiscard]] std::string toString() const override {
         std::string result = "TRICK" + std::to_string(trickNumber);
-        for (const auto & card : cardsOnTable) {
+        for (const auto & card : cards) {
             result += card.toString();
         }
         result += "\r\n";
@@ -457,7 +463,7 @@ public:
     std::vector<Card> cardsOnTable;
     Seat takerSeat;
     explicit Taken(int trickNumber, std::vector<Card> cardsOnTable, Seat takerSeat) : trickNumber(trickNumber), cardsOnTable(std::move(cardsOnTable)), takerSeat(takerSeat) {
-        assert(trickNumber >= Trick::FirstTrickNumber && trickNumber <= 13);
+        assert(trickNumber >= Trick::FirstTrickNumber && trickNumber <= Trick::LastTrickNumber);
     }
     [[nodiscard]] std::string toString() const override {
         std::string result = "TAKEN" + std::to_string(trickNumber);
@@ -712,6 +718,22 @@ struct DealConfig {
     std::unordered_map<Seat, std::vector<Card>> cards;
 };
 
+// Function that returns the string with ip and port of the other side of the given socket (works for both IPv4 and IPv6)
+std::string getSocketIPAndPort(int socket_fd) {
+    struct sockaddr_storage address{};
+    socklen_t address_length = sizeof(struct sockaddr_storage);
+
+    // Get remote address
+    if (getpeername(socket_fd, (struct sockaddr*)&address, &address_length) == -1) {
+        return "<ip-port-unknown>";
+    }
+    char ipstr[INET6_ADDRSTRLEN];
+    inet_ntop(address.ss_family, &address, ipstr, sizeof(ipstr));
+    int port = ntohs(((struct sockaddr_in*)&address)->sin_port);
+    return std::string(ipstr) + ":" + std::to_string(port);
+}
+
+
 class PollBuffer {
 private:
     std::string buffer_in_msg_separator;
@@ -741,11 +763,11 @@ private:
                     Reporter::debug(Color::Yellow, "Read would block - skipping.");
                     return;
                 }
-                Reporter::debug(Color::Red, "Connection closed due to error.");
+                Reporter::debug(Color::Red, "Connection closed " + getSocketIPAndPort(pollfd->fd) + " due to error.");
                 error = true; return;
             }
             if (size == 0) {
-                Reporter::debug(Color::Blue, "Connection closed with EOF.");
+                Reporter::debug(Color::Blue, "Connection with " + getSocketIPAndPort(pollfd->fd) + " closed with EOF.");
                 error = true; // closed connection is also an error for SafePoll
                 return;
             }
@@ -761,11 +783,11 @@ private:
                     Reporter::debug(Color::Yellow, "Write would block - skipping.");
                     return;
                 }
-                Reporter::debug(Color::Red, "Connection closed due to error.");
+                Reporter::debug(Color::Red, "Connection with " + getSocketIPAndPort(pollfd->fd) + " closed due to error.");
                 error = true; return;
             }
             if (size == 0) {
-                Reporter::debug(Color::Blue, "Connection closed with EOF.");
+                Reporter::debug(Color::Blue, "Connection with " + getSocketIPAndPort(pollfd->fd) + " closed <-- EOF.");
                 error = true; // closed connection is also an error for SafePoll
                 return;
             }
@@ -839,7 +861,7 @@ public:
     [[nodiscard]] bool hasError() const {
         return error;
     }
-    bool hasMessage() {
+    [[nodiscard]] bool hasMessage() const {
         return buffer_in.find(buffer_in_msg_separator) != std::string::npos;
     }
     bool isWriting() {
@@ -876,6 +898,35 @@ public:
     [[nodiscard]] bool isConnected() const {
         return pollfd != nullptr && pollfd->fd != -1;
     }
+
+    int _flushWrite() {
+        while (!buffer_out.empty()) {
+            ssize_t size = write(pollfd->fd, buffer_out.c_str(), buffer_out.size());
+            if (size < 0) {
+                Reporter::debug(Color::Red, "Flushing write buffer failed.");
+                return -1;
+            }
+            if (size == 0) {
+                Reporter::debug(Color::Blue, "Flushing write buffer stopped - connection closed with EOF.");
+                return 0;
+            }
+            buffer_out.erase(0, size);
+        }
+        return 0;
+    }
+    // Danger: this function is *blocking* to flush the whole output buffer!
+    // It writes directly to the socket and waits until the whole buffer is written.
+    void flush() {
+        // Change the socket to blocking mode.
+        // This is necessary to ensure that the whole buffer is written.
+        int flags = fcntl(pollfd->fd, F_GETFL, 0);
+        fcntl(pollfd->fd, F_SETFL, flags & ~O_NONBLOCK);
+
+        _flushWrite();
+
+        // Change the socket back to non-blocking mode (if it was non-blocking before).
+        fcntl(pollfd->fd, F_SETFL, flags);
+    }
 };
 
 
@@ -894,11 +945,100 @@ public:
 
 };
 
+
 struct PlayerStats {
     int points_deal = 0;
     int points_total = 0;
-    //
+    std::set<Card> hand;
+    std::set<Card> cards_taken;
+
+    bool hasCard(const Card& card) {
+        return hand.find(card) != hand.end();
+    }
+    [[nodiscard]] bool hasSuit(CardSuit suit) const {
+        return std::any_of(hand.begin(), hand.end(), [suit](const Card& card) {
+            return card.suit == suit;
+        });
+    }
+    void removeCard(const Card& card) {
+        hand.erase(card);
+    }
+
+    void takeTrick(const std::vector<Card>& cards, int points) {
+        cards_taken.insert(cards.begin(), cards.end());
+        points_deal += points;
+        points_total += points;
+    }
+
+    void takeNewDeal(const std::vector<Card>& newHand) {
+        hand.clear();
+        hand.insert(newHand.begin(), newHand.end());
+        points_deal = 0;
+    }
 };
+
+/*
+ * Zasady gry
+W kierki gra czterech graczy standardową 52-kartową talią. Gracze siedzą przy stole na miejscach N (ang. north), E (ang. east), S (ang south), W (ang. west). Rozgrywka składa się z rozdań. W każdym rozdaniu każdy z graczy otrzymuje na początku po 13 kart. Gracz zna tylko swoje karty. Gra składa się z 13 lew. W pierwszej lewie wybrany gracz wychodzi, czyli rozpoczyna rozdanie, kładąc wybraną swoją kartę na stół. Po czym pozostali gracze w kolejności ruchu wskazówek zegara dokładają po jednej swojej karcie. Istnieje obowiązek dokładania kart do koloru. Jeśli gracz nie ma karty w wymaganym kolorze, może położyć kartę w dowolnym innym kolorze. Nie ma obowiązku przebijania kartą starszą. Gracz, który wyłożył najstarszą kartę w kolorze karty położonej przez gracza wychodzącego, bierze lewę i wychodzi jako pierwszy w następnej lewie. Obowiązuje standardowe starszeństwo kart (od najsłabszej): 2, 3, 4, …, 9, 10, walet, dama, król, as.
+
+W grze chodzi o to, żeby brać jak najmniej kart. Za branie kart otrzymuje się punkty. Wygrywa gracz, który w całej rozgrywce zbierze najmniej punktów. Jest siedem typów rozdań:
+
+ Deal type:
+1. nie brać lew, za każdą wziętą lewę (nie kartę, lewę!!!) dostaje się 1 punkt;
+2. nie brać kierów, za każdego wziętego kiera dostaje się 1 punkt;
+3. nie brać dam, za każdą wziętą damę dostaje się 5 punktów;
+4. nie brać panów (waletów i króli), za każdego wziętego pana dostaje się 2 punkty;
+5. nie brać króla kier, za jego wzięcie dostaje się 18 punktów;
+6. nie brać siódmej i ostatniej lewy, za wzięcie każdej z tych lew dostaje się po 10 punktów;
+7. rozbójnik, punkty dostaje się za wszystko wymienione powyżej.
+ */
+int countPoints(const std::vector<Card>& cards, DealType dealType, int trickNumber) {
+    int points = 0;
+    for (const auto& card: cards) {
+        switch (dealType) {
+            case DealType::NoHearts:
+                if (card.suit == CardSuit::Hearts)
+                    points += 1;
+                break;
+            case DealType::NoQueens:
+                if (card.value == CardValue::Queen)
+                    points += 5;
+                break;
+            case DealType::NoKingsJacks:
+                if (card.value == CardValue::King || card.value == CardValue::Jack)
+                    points += 2;
+                break;
+            case DealType::NoKingOfHearts:
+                if (card.value == CardValue::King && card.suit == CardSuit::Hearts)
+                    points += 18;
+                break;
+            case DealType::No7AndLastTrick:
+                if (trickNumber == Trick::LastTrickNumber || trickNumber == 7)
+                    points += 10;
+                break;
+            case DealType::Robber:
+                if (card.suit == CardSuit::Hearts)
+                    points += 1;
+                if (card.value == CardValue::Queen)
+                    points += 5;
+                if (card.value == CardValue::King || card.value == CardValue::Jack)
+                    points += 2;
+                if (card.value == CardValue::King && card.suit == CardSuit::Hearts)
+                    points += 18;
+                if (trickNumber == Trick::LastTrickNumber || trickNumber == 7)
+                    points += 10;
+                break;
+            default:
+                break; // we'll handle Robber and NoTricks separately
+        }
+    }
+
+    if (dealType == DealType::NoTricks || dealType == DealType::Robber)
+        points += 1;
+
+    return points;
+}
+
 
 class Server {
 private:
@@ -906,7 +1046,7 @@ private:
 
     struct Polling {
         static constexpr int Connections = 32;
-        // intialize the pollfd array with values {.fd = -1, .events = 0, .revents = 0}
+        // initialize the pollfd array with values {.fd = -1, .events = 0, .revents = 0}
         std::array<struct pollfd, Connections> fds{};
         const int fdAcceptIdx = 0;
         Polling() {
@@ -994,8 +1134,9 @@ private:
         PollBuffer buffer;
         time_t trickRequestTime{};
         Seat seat{};
+        PlayerStats stats;
 
-        explicit Player(Seat seat, PollBuffer buffer) : buffer(std::move(buffer)), seat(seat) {}
+        Player(Seat seat, PollBuffer buffer) : buffer(std::move(buffer)), seat(seat) {}
 
         [[nodiscard]] bool isConnected() const {
             return buffer.isConnected();
@@ -1003,6 +1144,10 @@ private:
 
         void connect(PollBuffer new_buffer) {
             this->buffer = std::move(new_buffer);
+        }
+
+        void disconnect() {
+            buffer.disconnect();
         }
     };
 
@@ -1175,84 +1320,6 @@ private:
         }
     }
 
-    void _updateCandidateMessagesOld() {
-        for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
-            auto &[buffer, candidate_state, connectionTime] = *candidate;
-
-            if (candidate->buffer.hasError()) {
-                // disconnect the candidate
-                candidate->buffer.disconnect();
-                Reporter::debug(Color::Red, "Candidate disconnected due to error.");
-
-                // remove the player from the players
-                candidate = poll.candidates.erase(
-                        candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
-                continue;
-            }
-
-            if (candidate->state == Polling::Candidate::State::WaitingForIAM) {
-                // check timeout todo check: maybe we should check hasMessage first
-                if (time(nullptr) - candidate->connectionTime >
-                    config.timeout_seconds) { // higher timeout accuracy? todo check
-                    buffer.disconnect();
-                    Reporter::debug(Color::Red, "Candidate disconnected due to timeout.");
-
-                    // remove the candidate
-                    candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
-                    continue;
-                }
-
-
-                if (candidate->buffer.hasMessage()) {
-                    auto msg = Parser::parse(candidate->buffer.readMessage());
-                    if (auto iam = std::dynamic_pointer_cast<IAm>(msg)) {
-                        // (a) first check, if the seat is not already taken
-                        if (players.at(iam->seat).isConnected()) {
-                            buffer.writeMessage(Busy(getTakenSeats()));
-                            candidate->state = Polling::Candidate::State::Rejecting; // we cannot disconnect candidate yet
-                        } else {
-                            // (b) if the seat is free, accept
-                            // change: candidate -> player
-                            players.at(iam->seat).buffer = (buffer);
-                            poll.candidates.erase(candidate);
-
-                            // CAUTION: send the TAKEN history from the current deal only
-                            auto &buf = players.at(iam->seat).buffer;
-                            buf.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat,
-                                                  game.currentDeal->cards[iam->seat]));
-                            for (auto &taken: game.takenHistory) {
-                                buf.writeMessage(taken);
-                            }
-                            Reporter::debug(Color::Green,
-                                            "Candidate accepted, connected and updated with history of (" +
-                                            std::to_string(game.takenHistory.size()) + ") taken cards.");
-                        }
-                    } else {
-                        // (c) if the message is not IAM, close immediately
-                        buffer.disconnect();
-                        Reporter::debug(Color::Red, "Candidate disconnected due to wrong message.");
-
-                        // remove the candidate
-                        candidate = poll.candidates.erase(candidate); // iteration still valid: https://en.cppreference.com/w/cpp/container/unordered_map/erase
-                        continue;
-                    }
-                }
-            }
-            else if (candidate_state == Polling::Candidate::State::Rejecting) {
-                if (buffer.isWriting()) {
-                    // wait for the message to be sent
-                } else {
-                    // disconnect and remove the candidate
-                    buffer.disconnect();
-                    candidate = poll.candidates.erase(candidate);
-                    Reporter::debug(Color::Red, "Candidate successfully rejected and disconnected.");
-                    continue;
-                }
-            }
-            candidate++;
-        }
-    }
-
     void safePoll() {
         while (true) {
             // ----------- reset revents, run poll and update the player poll players ------------
@@ -1272,6 +1339,7 @@ private:
                 Reporter::debug(Color::Green, "Safe poll finished. All players connected!");
                 return;
             }
+            Reporter::debug(Color::Yellow, "Waiting for all players to connect...");
         }
     }
 
@@ -1281,121 +1349,306 @@ private:
         std::vector<Taken> takenHistory;
         std::vector<Card> cardsOnTable;
 
-        std::unordered_map<Seat, PlayerStats> playerStats;
         int trickNumber = Trick::FirstTrickNumber; // 1-13
-        Seat firstPlayerSeat{};
         Player* currentPlayer{};
-        int currentPlayerPollIdx{};
 
-        Seat trickWinner{};
+        Seat trickWinnerSeat{};
 
         // Assume: trickNumber is set for the current trick.
         Seat getStartingSeat() const {
             if (trickNumber == Trick::FirstTrickNumber) {
                 return currentDeal->firstSeat;
             }
-            return trickWinner;
+            return trickWinnerSeat;
         }
     } game;
 
 
-    // ---------------- States ----------------
+    // ------------------------------------------- State machine -------------------------------------------
 
+    // ===================================================================================================
     // variable pointing to function that handles current state (use wrappers not raw function pointers)
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
-    bool stateShouldPoll = true; // bending spoons
+    // whether the state should update poll before calling the state function
+    bool stateShouldPoll = true;
 
+    // Function to change the current state.
     void ChangeState(std::function<void()> newState, bool shouldPoll = true) {
         state = std::move(newState);
         stateShouldPoll = shouldPoll;
+    }
+    // ===================================================================================================
+
+    void _checkOtherPlayersMessages() {
+        for (auto& [seat, player]: players) {
+            if (player.buffer.hasMessage() && seat != game.currentPlayer->seat) {
+                auto msg = Parser::parse(player.buffer.readMessage());
+                if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
+                    Reporter::logWarning("Player " + ::toString(seat) + " sent a TRICK message, but it's not his turn.");
+                    player.buffer.writeMessage(Wrong(game.trickNumber));
+                } else {
+                    Reporter::logError("Player " + ::toString(seat) + ": unexpected message received. Closing connection.");
+                    player.disconnect();
+                }
+            }
+        }
+    }
+
+    Player* _whoTakesTrick() {
+        assert(game.cardsOnTable.size() == 4);
+        auto firstCardSuit = game.cardsOnTable[0].suit;
+        auto winningCard = game.cardsOnTable[0];
+        Player* winnerPlayer = &players.at(game.getStartingSeat());
+
+        for (auto [i, player] = std::tuple(0, winnerPlayer); i < std::ssize(game.cardsOnTable); i++, player = &players.at(nextSeat(player->seat))) {
+            if (game.cardsOnTable[i].suit == firstCardSuit && winningCard < game.cardsOnTable[i]) {
+                winningCard = game.cardsOnTable[i];
+                winnerPlayer = player;
+            }
+        }
+
+        return winnerPlayer;
+    }
+
+    void _sendScoresAndTotals() {
+        // Send the score and total messages to all players (it's done at the end of each deal)
+        Score score(std::unordered_map<Seat, int>{
+            {Seat::N, players.at(Seat::N).stats.points_deal},
+            {Seat::E, players.at(Seat::E).stats.points_deal},
+            {Seat::S, players.at(Seat::S).stats.points_deal},
+            {Seat::W, players.at(Seat::W).stats.points_deal}
+        });
+        for (auto& [seat, player]: players) {
+            player.buffer.writeMessage(score);
+        }
+
+        Total total(std::unordered_map<Seat, int>{
+            {Seat::N, players.at(Seat::N).stats.points_total},
+            {Seat::E, players.at(Seat::E).stats.points_total},
+            {Seat::S, players.at(Seat::S).stats.points_total},
+            {Seat::W, players.at(Seat::W).stats.points_total}
+        });
+        for (auto& [seat, player]: players) {
+            player.buffer.writeMessage(total);
+        }
+    }
+
+    void _finalizeDeal() {
+        // Send the score and total messages to all players (it's done at the end of each deal)
+        _sendScoresAndTotals();
+
+        // If the deal is not over yet, continue with the next deal and set the state to stateStartTrick
+        if (game.currentDeal != config.deals.end() - 1) {
+            setCurrentDeal(game.currentDeal + 1);
+            sendDealInfo(); // we assume that the players are 'atomically' still connected since the last safePoll
+            ChangeState([this] { stateStartTrick(Trick::FirstTrickNumber); });
+            return;
+        }
+
+        // *** The game is over! ***
+        poll.stopAccepting();
+        Reporter::log("Game is over. Disconnecting all players.");
+        for (auto& [seat, player]: players) {
+            player.buffer.flush(); // very important! this can block, but it's the last message anyway
+            player.disconnect();
+            Reporter::log("Player " + ::toString(seat) + " disconnected.");
+        }
+
+        Reporter::log("Exiting the server... o7");
+        exit(0);
+    }
+
+    bool isDealResultDetermined() {
+        return game.trickNumber == Trick::LastTrickNumber;
+    }
+
+    void _handleCorrectTrick(std::shared_ptr<Trick> trick) {
+        // Update the cards on the table and in the player's hand
+        game.cardsOnTable.push_back(trick->cards[0]);
+        game.currentPlayer->stats.removeCard(trick->cards[0]);
+
+        // If the current player is NOT the last one in the trick (4th player)...
+        if (game.cardsOnTable.size() < 4) {
+            game.currentPlayer = &players.at(nextSeat(game.currentPlayer->seat));
+            ChangeState([this] { stateSendTrick(); });
+            return;
+        }
+
+        // *** The trick is complete! ***
+
+        // Find the 'winner' of the trick (the player with the highest card of the first card's suit)
+        auto winner = _whoTakesTrick();
+        game.trickWinnerSeat = winner->seat;
+
+        // Update the stats of the players (actually just the winner, the rest is unchanged)
+        int points = countPoints(game.cardsOnTable, game.currentDeal->dealType, game.trickNumber);
+        winner->stats.takeTrick(game.cardsOnTable, points);
+
+        // Send the taken message to all players (including the winner) and update the history of taken cards
+        Taken taken(game.trickNumber, game.cardsOnTable, winner->seat);
+        for (auto& [seat, player]: players) {
+            player.buffer.writeMessage(taken);
+        }
+        game.takenHistory.push_back(taken);
+
+
+        // If the deal is not over yet, continue with the next trick
+        if (!isDealResultDetermined()) {
+            game.trickNumber++; assert(game.trickNumber <= Trick::LastTrickNumber);
+            ChangeState([this] { stateStartTrick(game.trickNumber); });
+            return;
+        }
+
+        // *** The deal is over! ***
+        _finalizeDeal();
+    }
+
+    void _handleMessageFromCurrentPlayer() {
+        auto raw_msg = game.currentPlayer->buffer.readMessage();
+        auto msg = Parser::parse(raw_msg);
+        auto trick = std::dynamic_pointer_cast<Trick>(msg);
+
+        // Syntax check: TRICK message
+        if (trick == nullptr) {
+            Reporter::logError("Player " + ::toString(game.currentPlayer->seat) + ": unexpected message received. Closing connection.");
+            game.currentPlayer->disconnect();
+            return; // and keep the WaitForTrick state
+        }
+
+        // Semantic check: trick number is correct
+        if (trick->trickNumber != game.trickNumber) {
+            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with incorrect trick number.");
+            game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
+            return; // and keep the WaitForTrick state
+        }
+
+        // Semantic check: trick has exactly 1 card
+        if (trick->cards.size() != 1) {
+            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with " + std::to_string(trick->cards.size()) + " cards.");
+            game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
+            return; // and keep the WaitForTrick state
+        }
+
+        // Semantic check: player has the card in his hand
+        if (!game.currentPlayer->stats.hasCard(trick->cards[0])) {
+            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with a card he doesn't have.");
+            game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
+            return; // and keep the WaitForTrick state
+        }
+
+        // Semantic check: if the card is not the first card in the trick AND the player put a card of a different suit than the first card,
+        // check if the player has any cards of the first card's suit
+        if (!game.cardsOnTable.empty() && trick->cards[0].suit != game.cardsOnTable[0].suit) {
+            if (game.currentPlayer->stats.hasSuit(game.cardsOnTable[0].suit)) {
+                Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with a card of a different suit than the first card (but HAD a card of the first card's suit).");
+                game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
+                return; // and keep the WaitForTrick state
+            }
+        }
+
+        // *** The trick is correct! ***
+        _handleCorrectTrick(trick);
+    }
+
+    void stateWaitForTrick() {
+        // Poll is already called and has some revents (possibly only timeout)
+        // Assumption: all players are connected!
+        for (auto& [seat, player]: players) {
+            assert(player.isConnected());
+            assert(player.buffer.hasError() == false);
+        }
+
+        // --------------------------------------------- Main logic ----------------------------------------------
+        // 0) Check *other* players' messages (not the current player):
+        //    - if there's a TRICK message, send WRONG to this player (because it's not his turn)
+        //    - if there's any other message or an invalid message, disconnect the player.
+        //
+        // 1) check if there was a message from the current player:
+        //    - if it's any other message, disconnect the player
+        //    - else if it's a TRICK message, run semantic checks and update the game state:
+        //        - if the trick is incorrect in the current context (e.g. wrong trick number), send WRONG to the player
+        //            - check if the trick number is correct
+        //            - check if the trick has exactly 1 card
+        //            - check if the player has the card in his hand (store the taken cards separately, they cannot be played again)
+        //            - if the card is not the first card in the trick AND the player put a card of a different suit than the first card,
+        //                - check if the player has any cards of the first card's suit (if so, send WRONG and of course print the warning)
+        //        - if the trick is correct, update the game state and change the state to stateSendTrick
+        //            - update the cards on the table
+        //            - if the player is NOT the last one in the trick (4th player),
+        //                - change the current player to the next one and change the state to stateSendTrick()
+        //            - if the player is the last one in the trick (4th player), do the following:
+        //                - find the 'winner' of the trick (the player with the highest card of the first card's suit)
+        //                - update the trickWinnerSeat
+        //                - update the stats (scores etc.) according to the type of the current deal (e.g. No7AndLastTrick)
+        //                - send the taken message to all players (including the winner) and update the history of taken cards
+        //                - if deal has NOT finished (meaning that the trick number is Trick::LastTrickNumber OR [todo] all penalties have been taken)
+        //                    - change the state to stateStartTrick(trick number + 1)
+        //                - else
+        //                    -> call _finishDeal() (it will send the scores and totals and change the deal to the next one or finish the game)
+        //
+        // 2) or else, if there was a timeout for the *current* player (only the current player can timeout):
+        //       - resend the trick message to the current player and change the state to stateWaitForTrick() with repolling
+
+        // 0) Check *other* players' messages (not the current player):
+        _checkOtherPlayersMessages();
+
+        // 1) check if there was a message from the current player:
+        if (game.currentPlayer->buffer.hasMessage()) {
+            _handleMessageFromCurrentPlayer();
+        }
+        // 2) or else, if there was a timeout for the *current* player (only the current player can timeout):
+        else if (time(nullptr) - game.currentPlayer->trickRequestTime > config.timeout_seconds) {
+            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " did not respond in time. ");
+            ChangeState([this] { stateSendTrick(); }, true);
+        }
+
     }
 
     void stateSendTrick() {
         game.currentPlayer->buffer.writeMessage(Trick(game.trickNumber, game.cardsOnTable));
         game.currentPlayer->trickRequestTime = time(nullptr);
-        // report
-        state = [this] { stateWaitForTrick(); };
-    }
 
-    void stateWaitForTrick() {
-        // Poll is already called and has some revents (possibly only timeout)
-        // 1) check if there was any timeout for any player,
-        // 2) update the poll timeout to <=smallest interval to upcoming timeout event
-//        if (!poll_buffers[game.currentPlayerPollIdx].hasMessage()) {
-//            // Check if timeout has been reached
-//            Reporter::debug("no messages from the current player..");
-//            return;
-//        }
-
-        // todo
-        // Check other players' messages .. should be none or trick attempts which will be wrong'ed
-
-        // this is checked *first*, regardless of the timeout, because of safePoll which could have paused the game
-        if (game.currentPlayer->buffer.hasMessage()) {
-            auto msg = Parser::parse(game.currentPlayer->buffer.readMessage());
-
-            if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
-                // Validate the trick
-                try {
-                    if (trick->trickNumber != game.trickNumber) {
-                        throw std::runtime_error("Trick number mismatch.");
-                    }
-
-                }
-                catch (std::exception &e) {
-                    Reporter::logWarning(e.what());
-                    game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
-                    return;
-                }
-            } else {
-                Reporter::logError(
-                        "Unexpected message received. Closing player " + ::toString(game.currentPlayer->seat) +
-                        " connection.");
-                game.currentPlayer->buffer.disconnect();
-                players.erase(game.currentPlayer->seat);
-                return; // and re-poll
-            }
-        } else {
-            // Check if timeout has been reached
-            if (time(nullptr) - game.currentPlayer->trickRequestTime > config.timeout_seconds) {
-                Reporter::debug(Color::Red, "Player " + ::toString(game.currentPlayer->seat) + " did not respond in time.");
-                state = [this] { stateSendTrick(); };
-                stateShouldPoll = true;
-                return;
-            }
-        }
+        ChangeState([this] { stateWaitForTrick(); });
     }
 
     void stateStartTrick(int trickNumber) {
+        assert(Trick::FirstTrickNumber <= trickNumber && trickNumber <= Trick::LastTrickNumber);
+
         game.trickNumber = trickNumber;
-        game.firstPlayerSeat = game.getStartingSeat();
-        game.currentPlayer = &players.at(game.firstPlayerSeat);
+        game.currentPlayer = &players.at(game.getStartingSeat());
         game.cardsOnTable.clear();
 
-        state = [this] { stateSendTrick(); };
-        stateShouldPoll = false;
+        ChangeState([this] { stateSendTrick(); }, false);
     }
 
-    // Assume: game.currentDeal points to the current deal in config.deals
-    void stateStartDeal(std::vector<DealConfig>::iterator dealIt) {
+    void setCurrentDeal(const std::vector<DealConfig>::iterator& dealIt) {
         game.currentDeal = dealIt;
-
-        state = [this] { stateStartTrick(Trick::FirstTrickNumber); };
-        stateShouldPoll = false;
+        game.takenHistory.clear();
+        for (auto& [seat, player]: players) {
+            player.stats.takeNewDeal(game.currentDeal->cards[seat]);
+        }
     }
-    // ----------------------------------------
 
-    public:
-    Server(ServerConfig
-    _config): config(std::move(_config))
-    {
-//        polldfs
-        state = [this] { stateStartDeal(config.deals.begin()); };
+    void sendDealInfo() {
+        for (auto& [seat, player]: players) {
+            player.buffer.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat, game.currentDeal->cards[seat]));
+        }
+    }
+
+    // -------------------------------------------------------------------------------------------------
+
+public:
+    explicit Server(ServerConfig _config): config(std::move(_config)) {
+        state = [this] { std::runtime_error("Server state is not set.");};
     }
 
     [[noreturn]] void run() {
         poll.startAccepting(config.port.value_or(0));
-        game.currentDeal = config.deals.begin();
+
+        // after successful poll, start the first trick in the first deal:
+        setCurrentDeal(config.deals.begin());
+        ChangeState([this] { stateStartTrick(Trick::FirstTrickNumber); });
+
         while (true) {
             // after calling this function, fds are updated, all 4 players are present without any errors:
             if (stateShouldPoll)
