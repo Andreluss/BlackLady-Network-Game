@@ -27,6 +27,8 @@
 #include <regex>
 #include <set>
 #include <unordered_set>
+#include <fstream>
+#include <queue>
 
 [[noreturn]] void syserr(const char* fmt, ...) {
     va_list fmt_args;
@@ -184,6 +186,9 @@ public:
         std::cout << "[" << senderIP << ":" << senderPort << "," << receiverIP << ":" << receiverPort << "," << time
                   << "] " << message << std::endl;
     }
+    static void toUser(const std::string &message) {
+        std::cout << message << std::endl;
+    }
 };
 
 // Write a function that returns the string with time in such a format: 2024-04-25T18:21:00.010 (with parts of seconds)
@@ -271,6 +276,7 @@ public:
         value = card.value;
         suit = card.suit;
     }
+    Card(CardSuit suit, CardValue value) : suit(suit), value(value) {}
 
     CardValue value;
     CardSuit suit;
@@ -382,7 +388,10 @@ public:
 class Msg {
 public:
     [[nodiscard]] virtual std::string toString() const = 0;
-     explicit operator std::string() const {
+    explicit operator std::string() const {
+        return toString();
+    }
+    [[nodiscard]] virtual std::string toStringVerbose() const {
         return toString();
     }
 };
@@ -395,6 +404,67 @@ public:
         return "IAM" + ::toString(seat) + "\r\n";
     }
 };
+/*
+ * Verbose versions of string messages:
+ * Komunikacja klienta z użytkownikiem
+Klient działający jako pośrednik udostępnia użytkownikowi interfejs tekstowy. Interfejs użytkownika powinien być intuicyjny. Klient wypisuje na standardowe wyjście informacje dla użytkownika i prośby od serwera o położenie karty. Klient czyta ze standardowego wejścia decyzje i polecenia użytkownika, na przykład polecenie wyświetlenia kart na ręce i wziętych lew. Klient w każdej chwili powinien móc spełnić polecenie użytkownika. Komunikacja z serwerem nie może blokować interfejsu użytkownika.
+
+Informacje od serwera formatowane są następująco:
+
+BUSY<lista zajętych miejsc przy stole>
+Place busy, list of busy places received: <lista zajętych miejsc przy stole>.
+
+DEAL<typ rozdania><miejsce przy stole klienta wychodzącego jako pierwszy w rozdaniu><lista kart>
+New deal <typ rozdania>: staring place <miejsce przy stole klienta wychodzącego jako pierwszy w rozdaniu>, your cards: <lista kart>.
+
+WRONG<numer lewy>
+Wrong message received in trick <numer lewy>.
+
+TAKEN<numer lewy><lista kart><miejsce przy stole klienta biorącego lewę>
+A trick <numer lewy> is taken by <miejsce przy stole klienta biorącego lewę>, cards <lista kart>.
+
+SCORE<miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów>
+The scores are:
+<miejsce przy stole klienta> | <liczba punktów>
+<miejsce przy stole klienta> | <liczba punktów>
+<miejsce przy stole klienta> | <liczba punktów>
+<miejsce przy stole klienta> | <liczba punktów>
+
+TOTAL<miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów><miejsce przy stole klienta><liczba punktów>
+The total scores are:
+<miejsce przy stole klienta> | <liczba punktów>
+<miejsce przy stole klienta> | <liczba punktów>
+<miejsce przy stole klienta> | <liczba punktów>
+<miejsce przy stole klienta> | <liczba punktów>
+
+TRICK<numer lewy><lista kart>
+Trick: (<numer lewy>) <lista kart>
+Available: <lista kart, które gracz jeszcze ma na ręce>
+W przypadku komunikatu TRICK użytkownik wybiera kartę do dołożenia, wpisując wykrzyknik i jej kod, np. "!10C", i naciskając enter. Ponadto użytkownik ma do dyspozycji takie polecenia, kończące się enterem:
+
+cards – wyświetlenie listy kart na ręce;
+tricks – wyświetlenie listy lew wziętych w ostatniej rozgrywce w kolejności wzięcia – każda lewa to lista kart w osobnej linii.
+Wszystkie listy w komunikatach dla użytkownika są wypisywane rozdzielone przecinkami i spacjami.
+ *
+ */
+
+// helper function that results the string with the list of elements separated by the separator (with no trailing separator)
+template<class It>
+std::string formatList(It itFirst, It itEnd, std::function<std::string(decltype(*itFirst))> elementToStringConverters, const std::string& separator = ", ") {
+    std::string result;
+    for (decltype(itFirst++) it = itFirst; it != itEnd; ) {
+        result += elementToStringConverters(*it);
+        it++;
+        if (it != itEnd) {
+            result += separator;
+        }
+    }
+    return result;
+}
+template<class T>
+std::string formatList(const std::vector<T>& list, std::function<std::string(T)> elementToStringConverter, const std::string& separator = ", ") {
+    return formatList(list.begin(), list.end(), elementToStringConverter, separator);
+}
 
 class Busy : public Msg {
     std::vector<Seat> busy_seats;
@@ -408,13 +478,21 @@ public:
         result += "\r\n";
         return result;
     }
+
+    std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "Place busy, list of busy places received: ";
+        result += formatList<Seat>(busy_seats, [](const Seat& seat) { return ::toString(seat); });
+        result += ".\r\n";
+        return result;
+    }
 };
 
 class Deal : public Msg {
+public:
     DealType dealType;
     Seat firstSeat;
     std::vector<Card> cards;
-public:
     Deal(DealType dealType, Seat firstSeat, std::vector<Card> cards) : dealType(dealType), firstSeat(firstSeat), cards(std::move(cards)) {}
     [[nodiscard]] std::string toString() const override {
         std::string result = "DEAL" + std::to_string(static_cast<int>(dealType)) + ::toString(firstSeat);
@@ -504,6 +582,19 @@ public:
 
 class Parser {
 public:
+    static std::vector<Card> parseCards(std::string cardsStr) {
+        std::vector<Card> cards;
+        std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
+        std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
+        std::sregex_iterator end;
+        while (it != end) {
+            std::smatch card_match = *it;
+            std::string cardStr = card_match.str();
+            cards.push_back(Card(cardStr));
+            ++it;
+        }
+        return cards;
+    }
     static std::shared_ptr<Msg> parse(std::string message) {
         std::smatch match;
 
@@ -799,9 +890,11 @@ private:
         }
     }
 
+    bool reporting_enabled = true;
 public:
-     explicit PollBuffer(struct pollfd *pollfd = nullptr, std::string msg_separator = "\r\n") {
+     explicit PollBuffer(struct pollfd *pollfd = nullptr, bool enable_reporting = true, std::string msg_separator = "\r\n") {
         buffer_in_msg_separator = std::move(msg_separator);
+        this->reporting_enabled = enable_reporting;
         this->pollfd = pollfd;
         if (pollfd != nullptr && pollfd->fd != -1) {
             pollfd->events = POLLIN;
@@ -845,7 +938,7 @@ public:
 
     void update() {
         if (!isConnected()) {
-            Reporter::error("Tried to update a disconnected client.");
+            Reporter::error("Tried to updateBuffers a disconnected client.");
             return;
         }
         // check if any error occurred and if so, the buffer is broken and the client should be disconnected and his data cleared
@@ -877,9 +970,11 @@ public:
         std::string message = buffer_in.substr(0, pos + buffer_in_msg_separator.size());
         buffer_in.erase(0, pos + buffer_in_msg_separator.size());
 
-        std::string localIP, remoteIP; int localPort, remotePort;
-        getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
-        Reporter::report(remoteIP, remotePort, localIP, localPort, getCurrentTime(), message);
+        if (reporting_enabled) {
+            std::string localIP, remoteIP; int localPort, remotePort;
+            getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
+            Reporter::report(remoteIP, remotePort, localIP, localPort, getCurrentTime(), message);
+        }
 
         return message;
     }
@@ -893,9 +988,11 @@ public:
         buffer_out += message;
         pollfd->events |= POLLOUT; // add the POLLOUT flag
 
-        std::string localIP, remoteIP; int localPort, remotePort;
-        getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
-        Reporter::report(localIP, localPort, remoteIP, remotePort, getCurrentTime(), message);
+        if (reporting_enabled) {
+            std::string localIP, remoteIP; int localPort, remotePort;
+            getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
+            Reporter::report(localIP, localPort, remoteIP, remotePort, getCurrentTime(), message);
+        }
     }
 
     void writeMessage(const Msg& message) {
@@ -939,50 +1036,70 @@ public:
 
 class ServerConfig {
 private:
+    static std::vector<DealConfig> readDealsFromFile(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            Reporter::error("Cannot open file: " + filename);
+            exit(1);
+        }
+
+        std::vector<DealConfig> deals;
+        /* Read file for multiple DealConfigs:
+         * Format of one DealConfig:
+         * <typ rozdania><miejsce przy stole klienta wychodzącego jako pierwszy w rozdaniu>\n
+            <lista kart klienta N>\n
+            <lista kart klienta E>\n
+            <lista kart klienta S>\n
+            <lista kart klienta W>\n
+         */
+        std::string line;
+        while (std::getline(file, line)) {
+            DealConfig dealConfig;
+            dealConfig.dealType = static_cast<DealType>(line[0] - '0');
+            dealConfig.firstSeat = Seat(line[1]);
+            for (int i = 0; i < 4; ++i) {
+                std::getline(file, line);
+                auto cards = Parser::parseCards(line);
+                dealConfig.cards[Seat("NESW"[i])] = cards;
+            }
+            deals.push_back(dealConfig);
+        }
+    }
 public:
     std::optional<int> port;
     std::vector<DealConfig> deals;
-    int timeout_seconds = 5;//todo getter
+    int timeout_seconds = 5;
 
     static ServerConfig FromArgs(int argc, char** argv) {
         ServerConfig config;
-        throw std::runtime_error("Not implemented");
+        int c;
+        try {
+            while ((c = getopt(argc, argv, "p:f:t:")) != -1) {
+                switch (c) {
+                    case 'p':
+                        config.port = std::stoi(optarg);
+                        break;
+                    case 'f':
+                        config.deals = readDealsFromFile(optarg);
+                        break;
+                    case 't':
+                        config.timeout_seconds = std::stoi(optarg);
+                        break;
+                    default:
+                        Reporter::error("Invalid argument");
+                        break;
+                }
+            }
+        }
+        catch (std::invalid_argument& e) {
+            Reporter::error("Argument error: " + std::string(e.what()));
+            exit(1);
+        }
+
         return config;
     }
-
 };
 
-
-struct PlayerStats {
-    int points_deal = 0;
-    int points_total = 0;
-    std::set<Card> hand;
-    std::set<Card> cards_taken;
-
-    bool hasCard(const Card& card) {
-        return hand.find(card) != hand.end();
-    }
-    [[nodiscard]] bool hasSuit(CardSuit suit) const {
-        return std::any_of(hand.begin(), hand.end(), [suit](const Card& card) {
-            return card.suit == suit;
-        });
-    }
-    void removeCard(const Card& card) {
-        hand.erase(card);
-    }
-
-    void takeTrick(const std::vector<Card>& cards, int points) {
-        cards_taken.insert(cards.begin(), cards.end());
-        points_deal += points;
-        points_total += points;
-    }
-
-    void takeNewDeal(const std::vector<Card>& newHand) {
-        hand.clear();
-        hand.insert(newHand.begin(), newHand.end());
-        points_deal = 0;
-    }
-};
 
 /*
  * Zasady gry
@@ -1046,6 +1163,47 @@ int countPoints(const std::vector<Card>& cards, DealType dealType, int trickNumb
     return points;
 }
 
+struct PlayerStats {
+    int points_deal = 0;
+    int points_total = 0;
+    std::set<Card> hand;
+    std::vector<std::vector<Card>> tricks_taken; // in the last deal
+    int getCurrentTrickNumber() const {
+        // 1-based, deduced by hand size, it's 13 initially
+        return 13 - hand.size() + 1;
+    }
+    DealType _currentDealType = DealType::Robber;
+    DealType getCurrentDealType() const {
+        return _currentDealType;
+    }
+
+    [[nodiscard]] bool hasCard(const Card& card) {
+        return hand.find(card) != hand.end();
+    }
+    [[nodiscard]] bool hasSuit(CardSuit suit) const {
+        return std::any_of(hand.begin(), hand.end(), [suit](const Card& card) {
+            return card.suit == suit;
+        });
+    }
+    void removeCard(const Card& card) {
+        hand.erase(card);
+    }
+
+    void takeTrick(const std::vector<Card>& cards, int points) {
+        tricks_taken.push_back(cards);
+        points_deal += points;
+        points_total += points;
+    }
+
+    void takeNewDeal(const std::vector<Card>& newHand, DealType dealType) {
+        _currentDealType = dealType;
+        tricks_taken.clear();
+        hand.clear();
+        hand.insert(newHand.begin(), newHand.end());
+        points_deal = 0;
+    }
+};
+
 
 class Server {
 private:
@@ -1064,17 +1222,17 @@ private:
             }
         }
         struct Candidate {
-            PollBuffer buffer;
+            PollBuffer buffer{};
             enum State {
                 WaitingForIAM,
                 Rejecting,
             } state;
-            time_t connectionTime;
+            time_t connectionTime{};
 
             explicit Candidate(PollBuffer buffer, State state = State::WaitingForIAM)
                     : buffer(std::move(buffer)), state(state), connectionTime(time(nullptr)) {}
 
-            explicit Candidate(struct pollfd* pollfd): Candidate(PollBuffer(pollfd)){}
+            explicit Candidate(struct pollfd* pollfd): Candidate(PollBuffer(pollfd)) {}
         };
 
         std::vector<Candidate> candidates{}; // in/out buffer wrappers for candidate players (without a seat yet)
@@ -1168,7 +1326,7 @@ private:
 
 private:
     void _pollUpdate() {
-        // ----------- reset revents, run poll and update the player poll players ------------
+        // ----------- reset revents, run poll and updateBuffers the player poll players ------------
         for (auto &fd: poll.fds) {
             fd.revents = 0;
         }
@@ -1183,7 +1341,7 @@ private:
     }
 
     void _updateDisconnections() {
-        // (1) update disconnections and remove disconnected players or candidates
+        // (1) updateBuffers disconnections and remove disconnected players or candidates
         for (auto &[seat, player]: players) {
             if (player.isConnected()) {
                 if (player.buffer.hasError()) {
@@ -1329,10 +1487,10 @@ private:
 
     void safePoll() {
         while (true) {
-            // ----------- reset revents, run poll and update the player poll players ------------
+            // ----------- reset revents, run poll and updateBuffers the player poll players ------------
             _pollUpdate();
 
-            // (1) update disconnections and remove disconnected players
+            // (1) updateBuffers disconnections and remove disconnected players
             _updateDisconnections();
 
             // (2) check if there are any new connections
@@ -1376,7 +1534,7 @@ private:
     // ===================================================================================================
     // variable pointing to function that handles current state (use wrappers not raw function pointers)
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
-    // whether the state should update poll before calling the state function
+    // whether the state should updateBuffers poll before calling the state function
     bool stateShouldPoll = true;
 
     // Function to change the current state.
@@ -1491,7 +1649,7 @@ private:
         int points = countPoints(game.cardsOnTable, game.currentDeal->dealType, game.trickNumber);
         winner->stats.takeTrick(game.cardsOnTable, points);
 
-        // Send the taken message to all players (including the winner) and update the history of taken cards
+        // Send the taken message to all players (including the winner) and updateBuffers the history of taken cards
         Taken taken(game.trickNumber, game.cardsOnTable, winner->seat);
         for (auto& [seat, player]: players) {
             player.buffer.writeMessage(taken);
@@ -1572,22 +1730,22 @@ private:
         //
         // 1) check if there was a message from the current player:
         //    - if it's any other message, disconnect the player
-        //    - else if it's a TRICK message, run semantic checks and update the game state:
+        //    - else if it's a TRICK message, run semantic checks and updateBuffers the game state:
         //        - if the trick is incorrect in the current context (e.g. wrong trick number), send WRONG to the player
         //            - check if the trick number is correct
         //            - check if the trick has exactly 1 card
         //            - check if the player has the card in his hand (store the taken cards separately, they cannot be played again)
         //            - if the card is not the first card in the trick AND the player put a card of a different suit than the first card,
         //                - check if the player has any cards of the first card's suit (if so, send WRONG and of course print the warning)
-        //        - if the trick is correct, update the game state and change the state to stateSendTrick
-        //            - update the cards on the table
+        //        - if the trick is correct, updateBuffers the game state and change the state to stateSendTrick
+        //            - updateBuffers the cards on the table
         //            - if the player is NOT the last one in the trick (4th player),
         //                - change the current player to the next one and change the state to stateSendTrick()
         //            - if the player is the last one in the trick (4th player), do the following:
         //                - find the 'winner' of the trick (the player with the highest card of the first card's suit)
-        //                - update the trickWinnerSeat
-        //                - update the stats (scores etc.) according to the type of the current deal (e.g. No7AndLastTrick)
-        //                - send the taken message to all players (including the winner) and update the history of taken cards
+        //                - updateBuffers the trickWinnerSeat
+        //                - updateBuffers the stats (scores etc.) according to the type of the current deal (e.g. No7AndLastTrick)
+        //                - send the taken message to all players (including the winner) and updateBuffers the history of taken cards
         //                - if deal has NOT finished (meaning that the trick number is Trick::LastTrickNumber OR [todo] all penalties have been taken)
         //                    - change the state to stateStartTrick(trick number + 1)
         //                - else
@@ -1632,7 +1790,7 @@ private:
         game.currentDeal = dealIt;
         game.takenHistory.clear();
         for (auto& [seat, player]: players) {
-            player.stats.takeNewDeal(game.currentDeal->cards[seat]);
+            player.stats.takeNewDeal(game.currentDeal->cards[seat], game.currentDeal->dealType);
         }
     }
 
@@ -1782,11 +1940,8 @@ public:
 
 class Client {
     ClientConfig config;
-    std::array<pollfd, 3> fds{
-        pollfd{.fd = -1, .events = 0, .revents = 0},
-        pollfd{.fd = -1, .events = 0, .revents = 0},
-        pollfd{.fd = -1, .events = 0, .revents = 0}
-    };
+    std::array<pollfd, 3> fds{pollfd{.fd = -1, .events = 0, .revents = 0}, pollfd{.fd = -1, .events = 0, .revents = 0},
+                              pollfd{.fd = -1, .events = 0, .revents = 0}};
     const int fdServerIdx = 0;
     const int fdStdinIdx = 1;
     const int fdStdoutIdx = 2;
@@ -1816,57 +1971,280 @@ class Client {
 
     void setup_poll_and_buffers() {
         fds[fdServerIdx].fd = server_socket();
-        buffers.Server = PollBuffer(&fds[fdServerIdx]);
+        Server = PollBuffer(&fds[fdServerIdx]);
 
-        fds[fdStdinIdx].fd = STDIN_FILENO;
-        buffers.StdIn = PollBuffer(&fds[fdStdinIdx]);
-
-        fds[fdStdoutIdx].fd = STDOUT_FILENO;
-        buffers.StdOut = PollBuffer(&fds[fdStdoutIdx]); // sets the POLLIN but whatever
+        if (config.isAutomatic) {
+            fds[fdStdinIdx].fd = -1;
+            human.connectStdIn(&fds[fdStdinIdx]);
+        }
     }
 
-    struct {
-        PollBuffer Server;
+    PollBuffer Server;
+
+    struct HumanPlayer {
+        // queue of trick requests that the player has typed and sent via stdin
+        std::queue<Card> cardsToTrick{};
         PollBuffer StdIn;
-        PollBuffer StdOut;
-    } buffers;
+        PlayerStats* stats;
+        // actually we don't need PollBuffer StdOut, because we can write to stdout directly - it's just a client app anyway ;P
+
+        void updateBuffers() {
+            StdIn.update();
+            if (StdIn.hasError()) { // validate obvious errors
+                Reporter::error("Standard input error. Exiting.");
+                exit(1);
+            }
+        }
+        const std::string ShowHandCommand = "cards";   // wyświetlenie listy kart na ręce;
+        const std::string ShowTricksCommand = "tricks"; // wyświetlenie listy lew wziętych w ostatniej rozgrywce w kolejności wzięcia – każda lewa to lista kart w osobnej linii.
+        const std::regex TrickRequestRegex = std::regex("!([2-9]|10|J|Q|K|A)(S|H|D|C)");
+
+        void _handleMessage(const std::string& raw) {
+            if (raw == ShowHandCommand) {
+                auto cardsStr = formatList(stats->hand.begin(), stats->hand.end(), [] (const Card& card) { return card.toString(); });
+                Reporter::toUser("Cards in your hand: " + cardsStr + ".");
+            }
+            else if (raw == ShowTricksCommand) {
+                Reporter::toUser("Tricks taken in the last deal:");
+                for (const auto& cards: stats->tricks_taken) {
+                    Reporter::toUser(formatList<Card>(cards, [] (const Card& card) { return card.toString(); }));
+                }
+                Reporter::toUser("--- End of list ---");
+            }
+            else if (std::regex_match(raw, TrickRequestRegex)) {
+                // todo check if the user can send a trick request at the moment?
+                // parse the trick request
+                auto cardStr = raw.substr(1);
+                auto card = Card(cardStr);
+                cardsToTrick.push(card);
+                Reporter::debug(Color::Green, "Received a trick request: " + card.toString() + ".");
+            }
+            else {
+                Reporter::logWarning("Unexpected message from the user: " + raw + " (skipping...)");
+            }
+        }
+        void handleMessages() {
+            while (StdIn.hasMessage()) {
+                auto raw = StdIn.readMessage();
+                _handleMessage(raw);
+            }
+        }
+        void connectStdIn(pollfd* fd) {
+            StdIn = PollBuffer(fd);
+        }
+        explicit HumanPlayer(PlayerStats* stats): stats(stats), StdIn() {}
+    } human = HumanPlayer(&stats);
 
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
     void ChangeState(std::function<void()> newState) {
         state = std::move(newState);
+        state(); // move to the new state immediately to prevent lock on poll
     }
 
+    PlayerStats stats;
+
+    void _updateStatsWithTaken(const std::shared_ptr<Taken>& taken) {
+        if (taken->takerSeat == config.seat) {
+            stats.takeTrick(taken->cardsOnTable, 0); // player doesn't need to count points [feature]
+        }
+    }
+
+    void stateWaitForNewDeal() {
+        if (Server.hasError()) {
+            // sever disconnected, but that's a good moment, because a new hasn't started
+            Reporter::log("------- Game over. Server disconnected. -------");
+            exit(0);
+        }
+
+        if (!Server.hasMessage()) { return; }
+
+        auto raw = Server.readMessage();
+        auto msg = Parser::parse(raw);
+
+        if (auto deal= std::dynamic_pointer_cast<Deal>(msg)) {
+            Reporter::toUser(deal->toStringVerbose());
+            stats.takeNewDeal(deal->cards, deal->dealType);
+            ChangeState([this] { stateWaitForTrick(); });
+        }
+        else if (auto busy = std::dynamic_pointer_cast<Busy>(msg)) {
+            Reporter::toUser(busy->toStringVerbose());
+            exit(1); // exit with error because the seat is taken
+        }
+        else {
+            Reporter::logWarning("Unexpected message from the server: " + raw + " (skipping...)");
+        }
+    }
+
+    void _exit1IfServerError() const {
+        if (Server.hasError()) {
+            Reporter::logError("Server disconnected unexpectedly. Exiting.");
+            exit(1);
+        }
+    }
+
+    // function for read and parse in one line that you can auto [msg, raw] = readAndParse();
+    auto readAndParse() {
+        auto raw = Server.readMessage();
+        auto msg = Parser::parse(raw);
+        return std::make_pair(msg, raw);
+    }
+
+    void stateWaitForTakenOrWrong(const Card& trickedCard, const Trick& serverTrick) {
+        _exit1IfServerError();
+
+        if (!Server.hasMessage()) { return; }
+
+        auto [msg, raw] = readAndParse();
+
+        if (auto taken = std::dynamic_pointer_cast<Taken>(msg)) {
+            Reporter::toUser(taken->toStringVerbose());
+            stats.removeCard(trickedCard); // successful trick request
+            _updateStatsWithTaken(taken);
+            ChangeState([this] { stateWaitForTrick(); });
+        }
+        else if (auto wrong = std::dynamic_pointer_cast<Wrong>(msg)) {
+            Reporter::toUser(wrong->toStringVerbose());
+            ChangeState([this, &serverTrick] { stateWaitForTrickWaitForPlayerTrick(serverTrick); });
+        }
+        else {
+            Reporter::logWarning("Unexpected message from the server: " + raw + " (skipping...)");
+        }
+    }
+
+    void stateWaitForTrickWaitForPlayerTrick(const Trick& serverTrick) {
+        _exit1IfServerError();
+
+        // here we expect the server only to resend us the trick message
+        if (Server.hasMessage()) {
+            auto raw = Server.readMessage();
+            auto msg = Parser::parse(raw);
+            if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
+                Reporter::toUser(trick->toStringVerbose());
+            }
+            else {
+                Reporter::logWarning("Unexpected message from the server: " + raw + " (skipping...)");
+            }
+        }
+
+        Card cardToTrick(CardSuit::Spades, CardValue::Ace); // just to initialize
+        if (config.isAutomatic) {
+            cardToTrick = robot.chooseCardToTrick(serverTrick);
+        }
+        else {
+            // check if player made the decision
+            if (human.cardsToTrick.empty()) { return; }
+            // and pop the first player decision
+            auto card = human.cardsToTrick.front();
+            human.cardsToTrick.pop();
+        }
+
+        // send the trick message to the server
+        Trick trick(stats.getCurrentTrickNumber(), {cardToTrick});
+        Server.writeMessage(trick);
+
+        Reporter::debug(Color::Green, "Processed and sent a trick request to the server: " + trick.toString() + ".");
+        ChangeState([this, &cardToTrick, &serverTrick] { stateWaitForTakenOrWrong(cardToTrick, serverTrick); });
+    }
+
+    struct Robot {
+        PlayerStats* stats;
+        explicit Robot(PlayerStats* stats): stats(stats) {}
+        Card chooseCardToTrick(const Trick& serverTrick) const {
+            if (stats->hand.empty()) {
+                throw std::runtime_error("Player has NO CARDS in hand, but was asked to TRICK");
+            }
+            // choose the first suitable card from the stats->hand
+            if (serverTrick.cards.empty()) {
+                return *stats->hand.begin();
+            }
+            for (const auto& card: stats->hand) {
+                if (card.suit == serverTrick.cards[0].suit) {
+                    return card;
+                }
+            }
+            return *stats->hand.begin(); // if no suitable card, return the first one
+        }
+    } robot = Robot(&stats);
+
+    void stateWaitForTrick() {
+        _exit1IfServerError();
+
+        if (!Server.hasMessage()) { return; }
+
+        auto [msg, raw] = readAndParse();
+
+        if (auto taken = std::dynamic_pointer_cast<Taken>(msg)) {
+            Reporter::toUser(taken->toStringVerbose());
+            // if we are receiving a history of this seat's player, updateBuffers the stats
+            _updateStatsWithTaken(taken);
+        }
+        else if (auto score = std::dynamic_pointer_cast<Score>(msg)) {
+            Reporter::toUser(score->toStringVerbose());
+            ChangeState([this] { stateWaitForTotal(); });
+        }
+        else if (auto total = std::dynamic_pointer_cast<Total>(msg)) {
+            Reporter::toUser(total->toStringVerbose());
+            ChangeState([this] { stateWaitForNewDeal(); });
+        }
+        else if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
+            // the server wants us to send the trick message
+            Reporter::toUser(trick->toStringVerbose());
+            ChangeState([this, &trick] { stateWaitForTrickWaitForPlayerTrick(*trick); }); // very important! is to move to next state immediately
+        }
+        else {
+            Reporter::logWarning("Unexpected message from the server: " + raw + " (skipping...)");
+        }
+    }
+
+    void stateWaitForTotal() {
+        _exit1IfServerError();
+
+        if (!Server.hasMessage()) { return; }
+
+        auto raw = Server.readMessage();
+        auto msg = Parser::parse(raw);
+        if (auto total = std::dynamic_pointer_cast<Total>(msg)) {
+            Reporter::toUser(total->toStringVerbose());
+            Reporter::log("Waiting for the next deal...");
+            ChangeState([this] { stateWaitForNewDeal(); });
+        }
+        else {
+            Reporter::logWarning("Unexpected message from the server: " + raw + " (skipping...)");
+        }
+    }
+
+
     void RePoll() {
-        // reset revents, run poll and update the buffers
+        // reset revents, run poll and updateBuffers the buffers
         for (auto &fd: fds) {
             fd.revents = 0;
         }
         ::poll(fds.data(), fds.size(), -1); // blocking
 
-        buffers.Server.update();
-        buffers.StdIn.update();
-        buffers.StdOut.update();
-
-        // validate obvious errors (do not check if server disconnected because the result depends on the state)
-        if (buffers.StdIn.hasError()) {
-            Reporter::error("Standard input error. Exiting.");
-            exit(1);
-        }
-        if (buffers.StdOut.hasError()) {
-            Reporter::error("Standard output error. Exiting.");
-            exit(1);
+        Server.update();
+        if (!config.isAutomatic) {
+            human.updateBuffers();
         }
     }
 
 public:
-    explicit Client(ClientConfig config): config(std::move(config)) {}
+    explicit Client(ClientConfig config): config(std::move(config)), Server() {}
 
-    void run() {
+    [[noreturn]] void run() {
         setup_poll_and_buffers();
 
+        // send IAM message to the server
+        Server.writeMessage(IAm(config.seat));
+
+
         while (true) {
-            // make sure there is some event and StdIn/Out is not closed
+            // make sure there is some event and StdIn is not broken
             RePoll();
+
+            if (!config.isAutomatic) {
+                // handle player input (if any), but if there's a trick input, don't handle it yet
+                human.handleMessages(); // (just add to queue of trick requests or something)
+            }
 
             // call current state function (possibly with one buffer error - server disconnected)
             state();
@@ -1879,7 +2257,9 @@ public:
 
 int main(int argc, char** argv) {
     install_sigpipe_handler();
-    testParser();
+//    testParser();
+    Busy b({Seat::N, Seat::E, Seat::S, Seat::W});
+    Reporter::toUser(b.toStringVerbose());
 
 //    ServerConfig config = ServerConfig::FromArgs(argc, argv);
     ServerConfig config {
