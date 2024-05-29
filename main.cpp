@@ -82,10 +82,10 @@ uint16_t read_port(char const *string) {
     return (uint16_t) port;
 }
 
-struct sockaddr_storage get_server_address(char const *host, uint16_t port) {
+struct sockaddr_storage get_server_address(char const *host, uint16_t port, int ai_family = AF_UNSPEC) {
     struct addrinfo hints{};
     memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_UNSPEC; // IPv4 or IPv6
+    hints.ai_family = ai_family; // AF_UNSPEC for IPv4 or IPv6
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
@@ -382,7 +382,6 @@ public:
 class Msg {
 public:
     [[nodiscard]] virtual std::string toString() const = 0;
-    // write a auto conversion to std::string
      explicit operator std::string() const {
         return toString();
     }
@@ -864,9 +863,13 @@ public:
     [[nodiscard]] bool hasMessage() const {
         return buffer_in.find(buffer_in_msg_separator) != std::string::npos;
     }
-    bool isWriting() {
-        return !buffer_out.empty();
-    }
+    // ------------------------------->---------------------------->---------------------------------->
+    // N E S W | TRICK -> N | wait (no msg) | safePoll (S disconnected) | safePoll ... |  safePoll ... | safePoll (S connected) | DEAL -> S
+    //                                                                    N -> TRICK   |
+    // TRICK -> N
+    // DEAL -> S   time 4.1
+    // N -> TRICK  time 4.2  (real time 1.3)
+    //
     std::string readMessage() {
         assert(hasMessage());
         // return the message including the separator and remove it from the buffer
@@ -879,6 +882,10 @@ public:
         Reporter::report(remoteIP, remotePort, localIP, localPort, getCurrentTime(), message);
 
         return message;
+    }
+
+    bool isWriting() {
+        return !buffer_out.empty();
     }
 
     void writeMessage(const std::string& message) {
@@ -1457,7 +1464,7 @@ private:
         Reporter::log("Exiting the server... o7");
         exit(0);
     }
-
+    // TRICK -> N   | safePoll | wait (no msg) | safePoll | wait (no msg) | safePoll (N disconnected, N connected) | wait (no msg) - timeout - RESEND TRICK -> N |
     bool isDealResultDetermined() {
         return game.trickNumber == Trick::LastTrickNumber;
     }
@@ -1661,6 +1668,214 @@ public:
     }
 };
 
+// #####################################################################################################################
+// ################################################## Client ###########################################################
+// #####################################################################################################################
+
+//Parametry wywołania klienta
+//        Parametry wywołania klienta mogą być podawane w dowolnej kolejności. Jeśli parametr został podany więcej niż raz lub podano sprzeczne parametry, to obowiązuje pierwsze lub ostatnie wystąpienie takiego parametru na liście parametrów.
+//
+//-h <host>
+//        Określa adres IP lub nazwę hosta serwera. Parametr jest obowiązkowy.
+//
+//-p <port>
+//        Określa numer portu, na którym nasłuchuje serwer. Parametr jest obowiązkowy.
+//
+//-4
+//Wymusza w komunikacji z serwerem użycie IP w wersji 4. Parametr jest opcjonalny.
+//
+//-6
+//Wymusza w komunikacji z serwerem użycie IP w wersji 6. Parametr jest opcjonalny.
+//
+//Jeśli nie podano ani parametru -4, ani -6, to wybór wersji protokołu IP należy scedować na wywołanie funkcji getaddrinfo, podając ai_family = AF_UNSPEC.
+//
+//                                                                                                                                              -N
+//                                                                                                                                              -E
+//                                                                                                                                              -S
+//                                                                                                                                              -W
+//Określa miejsce, które klient chce zająć przy stole. Parametr jest obowiązkowy.
+//
+//-a
+//        Parametr jest opcjonalny. Jeśli jest podany, to klient jest automatycznym graczem. Jeśli nie jest podany, to klient jest pośrednikiem między serwerem a graczem-użytkownikiem.
+//
+
+struct ClientConfig {
+    std::string host;
+    int port{};
+    enum IPAddressFamily {
+        IPv4,
+        IPv6,
+        Unspecified
+    } ipFamily = Unspecified;
+    Seat seat{};
+    bool isAutomatic = false;
+public:
+    // use getopt()
+    static ClientConfig FromArgs(int argc, char** argv) {
+        ClientConfig config;
+        int c;
+        // mandatory arguments
+        bool hostSet = false;
+        bool portSet = false;
+        bool seatSet = false;
+        while ((c = getopt(argc, argv, "h:p:46NESWa")) != -1) {
+            switch (c) {
+                case 'h':
+                    config.host = optarg;
+                    hostSet = true;
+                    break;
+                case 'p':
+                    config.port = std::stoi(optarg);
+                    portSet = true;
+                    break;
+                case '4':
+                    config.ipFamily = IPAddressFamily::IPv4;
+                    break;
+                case '6':
+                    config.ipFamily = IPAddressFamily::IPv6;
+                    break;
+                case 'N':
+                    config.seat = Seat::N;
+                    seatSet = true;
+                    break;
+                case 'E':
+                    config.seat = Seat::E;
+                    seatSet = true;
+                    break;
+                case 'S':
+                    config.seat = Seat::S;
+                    seatSet = true;
+                    break;
+                case 'W':
+                    config.seat = Seat::W;
+                    seatSet = true;
+                    break;
+                case 'a':
+                    config.isAutomatic = true;
+                    break;
+                default:
+                    Reporter::error("Invalid argument. Exiting.");
+                    exit(1);
+            }
+        }
+
+        if (!hostSet || !portSet || !seatSet) {
+            Reporter::error("Missing mandatory arguments (" + std::string(hostSet ? "" : "host ")
+                        + std::string(portSet ? "" : "port ") + std::string(seatSet ? "" : "seat ") + "). Exiting.");
+            exit(1);
+        }
+
+        return config;
+    }
+
+    [[nodiscard]] decltype(AF_UNSPEC) getIPFamily() const {
+        switch (ipFamily) {
+            case IPv4:
+                return AF_INET;
+            case IPv6:
+                return AF_INET6;
+            case Unspecified:
+                return AF_UNSPEC;
+        }
+    }
+};
+
+class Client {
+    ClientConfig config;
+    std::array<pollfd, 3> fds{
+        pollfd{.fd = -1, .events = 0, .revents = 0},
+        pollfd{.fd = -1, .events = 0, .revents = 0},
+        pollfd{.fd = -1, .events = 0, .revents = 0}
+    };
+    const int fdServerIdx = 0;
+    const int fdStdinIdx = 1;
+    const int fdStdoutIdx = 2;
+
+    // Creates and returns a socket connected to the server.
+    [[nodiscard]] int server_socket() {
+        // connect to the server according to config:
+        int socket_fd = socket(config.getIPFamily(), SOCK_STREAM, 0);
+        if (socket_fd < 0) {
+            syserr("socket");
+        }
+        auto server_address = get_server_address(config.host.c_str(), config.port, config.getIPFamily());
+        if (connect(socket_fd, (struct sockaddr *) &server_address, sizeof server_address) < 0) {
+            syserr("connect");
+        }
+
+        // set to nonblocking mode
+        if (fcntl(socket_fd, F_SETFL, O_NONBLOCK)) {
+            syserr("fcntl");
+        }
+
+        // print the server info from server_address (convert the address to string)
+        Reporter::log("Connected to server " + getSocketIPAndPort(socket_fd) + ".");
+
+        return socket_fd;
+    }
+
+    void setup_poll_and_buffers() {
+        fds[fdServerIdx].fd = server_socket();
+        buffers.Server = PollBuffer(&fds[fdServerIdx]);
+
+        fds[fdStdinIdx].fd = STDIN_FILENO;
+        buffers.StdIn = PollBuffer(&fds[fdStdinIdx]);
+
+        fds[fdStdoutIdx].fd = STDOUT_FILENO;
+        buffers.StdOut = PollBuffer(&fds[fdStdoutIdx]); // sets the POLLIN but whatever
+    }
+
+    struct {
+        PollBuffer Server;
+        PollBuffer StdIn;
+        PollBuffer StdOut;
+    } buffers;
+
+    std::function<void()> state = [] { throw std::runtime_error("State not set."); };
+    void ChangeState(std::function<void()> newState) {
+        state = std::move(newState);
+    }
+
+    void RePoll() {
+        // reset revents, run poll and update the buffers
+        for (auto &fd: fds) {
+            fd.revents = 0;
+        }
+        ::poll(fds.data(), fds.size(), -1); // blocking
+
+        buffers.Server.update();
+        buffers.StdIn.update();
+        buffers.StdOut.update();
+
+        // validate obvious errors (do not check if server disconnected because the result depends on the state)
+        if (buffers.StdIn.hasError()) {
+            Reporter::error("Standard input error. Exiting.");
+            exit(1);
+        }
+        if (buffers.StdOut.hasError()) {
+            Reporter::error("Standard output error. Exiting.");
+            exit(1);
+        }
+    }
+
+public:
+    explicit Client(ClientConfig config): config(std::move(config)) {}
+
+    void run() {
+        setup_poll_and_buffers();
+
+        while (true) {
+            // make sure there is some event and StdIn/Out is not closed
+            RePoll();
+
+            // call current state function (possibly with one buffer error - server disconnected)
+            state();
+        }
+    }
+};
+
+
+// #####################################################################################################################
 
 int main(int argc, char** argv) {
     install_sigpipe_handler();
