@@ -508,6 +508,7 @@ public:
         result += "New deal " + std::to_string(static_cast<int>(dealType)) + ": starting place " + ::toString(firstSeat) + ", your cards: ";
         result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
         result += ".\r\n";
+        return result;
     }
 };
 
@@ -552,6 +553,7 @@ public:
     [[nodiscard]] std::string toStringVerbose() const override {
         std::string result = this->toString();
         result += "Wrong message received in trick " + std::to_string(trickNumber) + ".\r\n";
+        return result;
     }
 };
 
