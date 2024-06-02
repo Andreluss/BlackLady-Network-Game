@@ -23,12 +23,13 @@
 #include <unistd.h>
 #include <csignal>
 #include <fcntl.h>
-#include <ranges>
 #include <regex>
 #include <set>
 #include <unordered_set>
 #include <fstream>
 #include <queue>
+
+#include "common.h"
 
 [[noreturn]] void syserr(const char* fmt, ...) {
     va_list fmt_args;
@@ -91,8 +92,11 @@ struct sockaddr_storage get_server_address(char const *host, uint16_t port, int 
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
+    // Convert port to string
+    std::string port_str = std::to_string(port);
+
     struct addrinfo *address_result;
-    int errcode = getaddrinfo(host, nullptr, &hints, &address_result);
+    int errcode = getaddrinfo(host, port_str.c_str(), &hints, &address_result);
     if (errcode != 0) {
         fatal("getaddrinfo: %s", gai_strerror(errcode));
     }
@@ -152,44 +156,44 @@ void install_sigpipe_handler() {
         syserr("Failed to set SIGPIPE handler");
     }
 }
-
-struct Color {
-    static constexpr const char* Red = "\033[31m";
-    static constexpr const char* Green = "\033[32m";
-    static constexpr const char* Yellow = "\033[33m";
-    static constexpr const char* Blue = "\033[34m";
-    static constexpr const char* Magenta = "\033[35m";
-    static constexpr const char* Cyan = "\033[36m";
-    static constexpr const char* Reset = "\033[0m";
-};
-
-class Reporter {
-public:
-    static void debug(std::string color, std::string message) {
-        std::cerr << color << message << Color::Reset << std::endl;
-    }
-    static void error(std::string message) {
-        std::cerr << "[------------]" << Color::Red << message << Color::Reset << std::endl;
-    }
-    static void log(std::string message) {
-        std::cerr << Color::Green << message << Color::Reset << std::endl;
-    }
-    static void logError(std::string message) {
-        std::cerr << Color::Red << "[Error] " << Color::Reset << message << std::endl;
-    }
-    static void logWarning(std::string message) {
-        std::cerr << Color::Yellow << "[Warning] " << Color::Reset << message << std::endl;
-    }
-
-    static void report(const std::string &senderIP, int senderPort, const std::string &receiverIP, int receiverPort,
-                       const std::string &time, const std::string &message) {
-        std::cout << "[" << senderIP << ":" << senderPort << "," << receiverIP << ":" << receiverPort << "," << time
-                  << "] " << message << std::endl;
-    }
-    static void toUser(const std::string &message) {
-        std::cout << message << std::endl;
-    }
-};
+//
+//struct Color {
+//    static constexpr const char* Red = "\033[31m";
+//    static constexpr const char* Green = "\033[32m";
+//    static constexpr const char* Yellow = "\033[33m";
+//    static constexpr const char* Blue = "\033[34m";
+//    static constexpr const char* Magenta = "\033[35m";
+//    static constexpr const char* Cyan = "\033[36m";
+//    static constexpr const char* Reset = "\033[0m";
+//};
+//
+//class Reporter {
+//public:
+//    static void debug(std::string color, std::string message) {
+//        std::cerr << color << message << Color::Reset << std::endl;
+//    }
+//    static void error(std::string message) {
+//        std::cerr << "[------------]" << Color::Red << message << Color::Reset << std::endl;
+//    }
+//    static void log(std::string message) {
+//        std::cerr << Color::Green << message << Color::Reset << std::endl;
+//    }
+//    static void logError(std::string message) {
+//        std::cerr << Color::Red << "[Error] " << Color::Reset << message << std::endl;
+//    }
+//    static void logWarning(std::string message) {
+//        std::cerr << Color::Yellow << "[Warning] " << Color::Reset << message << std::endl;
+//    }
+//
+//    static void report(const std::string &senderIP, int senderPort, const std::string &receiverIP, int receiverPort,
+//                       const std::string &time, const std::string &message) {
+//        std::cout << "[" << senderIP << ":" << senderPort << "," << receiverIP << ":" << receiverPort << "," << time
+//                  << "] " << message << std::endl;
+//    }
+//    static void toUser(const std::string &message) {
+//        std::cout << message << std::endl;
+//    }
+//};
 
 // Write a function that returns the string with time in such a format: 2024-04-25T18:21:00.010 (with parts of seconds)
 std::string getCurrentTime() {
@@ -272,11 +276,11 @@ enum class CardSuit {
 
 struct Card {
 public:
-    Card(const Card& card) {
-        value = card.value;
-        suit = card.suit;
-    }
-    Card(CardSuit suit, CardValue value) : suit(suit), value(value) {}
+//    Card(const Card& card) {
+//        value = card.value;
+//        suit = card.suit;
+//    }
+    Card(CardSuit suit, CardValue value) : value(value), suit(suit) {}
 
     CardValue value;
     CardSuit suit;
@@ -514,8 +518,8 @@ public:
 
 class Trick : public Msg {
 public:
-    std::vector<Card> cards;
     int trickNumber; // 1-13
+    std::vector<Card> cards;
     static constexpr int FirstTrickNumber = 1;
     static constexpr int LastTrickNumber = 13;
     Trick(int trickNumber, std::vector<Card> cardsOnTable) : trickNumber(trickNumber), cards(std::move(cardsOnTable)) {
@@ -2032,9 +2036,8 @@ class Client {
     struct HumanPlayer {
         // queue of trick requests that the player has typed and sent via stdin
         std::queue<Card> cardsToTrick{};
-        PollBuffer StdIn;
+        PollBuffer StdIn{}; // actually we don't need PollBuffer StdOut, because we can write to stdout directly
         PlayerStats* stats;
-        // actually we don't need PollBuffer StdOut, because we can write to stdout directly - it's just a client app anyway ;P
 
         void updateBuffers() {
             StdIn.update();
@@ -2083,7 +2086,7 @@ class Client {
         void connectStdIn(pollfd* fd) {
             StdIn = PollBuffer(fd);
         }
-        explicit HumanPlayer(PlayerStats* stats): stats(stats), StdIn() {}
+        explicit HumanPlayer(PlayerStats* stats): stats(stats) {}
     } human = HumanPlayer(&stats);
 
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
@@ -2162,6 +2165,21 @@ class Client {
         }
     }
 
+    std::optional<Card> _chooseCardToTrick(const Trick& serverTrick) {
+        if (config.isAutomatic) {
+            return robot.chooseCardToTrick(serverTrick);
+        }
+        else {
+            // check if player has already made a request to trick a card
+            if (human.cardsToTrick.empty()) { return std::nullopt; }
+
+            // and pop the first player decision
+            auto cardToTrick = human.cardsToTrick.front();
+            human.cardsToTrick.pop();
+            return cardToTrick;
+        }
+    }
+
 
     void stateWaitForTrickWaitForPlayerTrick(const Trick& serverTrick) {
         _exit1IfServerError();
@@ -2180,17 +2198,10 @@ class Client {
             }
         }
 
-        Card cardToTrick(CardSuit::Spades, CardValue::Ace); // just to initialize
-        if (config.isAutomatic) {
-            cardToTrick = robot.chooseCardToTrick(serverTrick);
-        }
-        else {
-            // check if player made the decision
-            if (human.cardsToTrick.empty()) { return; }
-            // and pop the first player decision
-            auto card = human.cardsToTrick.front();
-            human.cardsToTrick.pop();
-        }
+        // choose the card to trick (or exit if the player hasn't made a decision yet)
+        auto optionalCardToTrick = _chooseCardToTrick(serverTrick);
+        if (!optionalCardToTrick.has_value()) { return; } // wait for the player to make a decision
+        Card cardToTrick = optionalCardToTrick.value();
 
         // send the trick message to the server
         Trick trick(stats.getCurrentTrickNumber(), {cardToTrick});
@@ -2203,7 +2214,7 @@ class Client {
     struct Robot {
         PlayerStats* stats;
         explicit Robot(PlayerStats* stats): stats(stats) {}
-        Card chooseCardToTrick(const Trick& serverTrick) const {
+        [[nodiscard]] Card chooseCardToTrick(const Trick& serverTrick) const {
             if (stats->hand.empty()) {
                 throw std::runtime_error("Player has NO CARDS in hand, but was asked to TRICK");
             }
