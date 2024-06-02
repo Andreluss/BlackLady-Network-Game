@@ -7,9 +7,6 @@ struct DealConfig {
     std::unordered_map<Seat, std::vector<Card>> cards;
 };
 
-
-
-
 class ServerConfig {
 private:
     static std::vector<DealConfig> readDealsFromFile(const std::string& filename) {
