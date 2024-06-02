@@ -76,21 +76,6 @@ public:
     }
 };
 
-/*
- * Zasady gry
-W kierki gra czterech graczy standardową 52-kartową talią. Gracze siedzą przy stole na miejscach N (ang. north), E (ang. east), S (ang south), W (ang. west). Rozgrywka składa się z rozdań. W każdym rozdaniu każdy z graczy otrzymuje na początku po 13 kart. Gracz zna tylko swoje karty. Gra składa się z 13 lew. W pierwszej lewie wybrany gracz wychodzi, czyli rozpoczyna rozdanie, kładąc wybraną swoją kartę na stół. Po czym pozostali gracze w kolejności ruchu wskazówek zegara dokładają po jednej swojej karcie. Istnieje obowiązek dokładania kart do koloru. Jeśli gracz nie ma karty w wymaganym kolorze, może położyć kartę w dowolnym innym kolorze. Nie ma obowiązku przebijania kartą starszą. Gracz, który wyłożył najstarszą kartę w kolorze karty położonej przez gracza wychodzącego, bierze lewę i wychodzi jako pierwszy w następnej lewie. Obowiązuje standardowe starszeństwo kart (od najsłabszej): 2, 3, 4, …, 9, 10, walet, dama, król, as.
-
-W grze chodzi o to, żeby brać jak najmniej kart. Za branie kart otrzymuje się punkty. Wygrywa gracz, który w całej rozgrywce zbierze najmniej punktów. Jest siedem typów rozdań:
-
- Deal type:
-1. nie brać lew, za każdą wziętą lewę (nie kartę, lewę!!!) dostaje się 1 punkt;
-2. nie brać kierów, za każdego wziętego kiera dostaje się 1 punkt;
-3. nie brać dam, za każdą wziętą damę dostaje się 5 punktów;
-4. nie brać panów (waletów i króli), za każdego wziętego pana dostaje się 2 punkty;
-5. nie brać króla kier, za jego wzięcie dostaje się 18 punktów;
-6. nie brać siódmej i ostatniej lewy, za wzięcie każdej z tych lew dostaje się po 10 punktów;
-7. rozbójnik, punkty dostaje się za wszystko wymienione powyżej.
- */
 int countPoints(const std::vector<Card>& cards, DealType dealType, int trickNumber) {
     int points = 0;
     for (const auto& card: cards) {
@@ -759,41 +744,6 @@ public:
         }
     }
 };
-
-// #####################################################################################################################
-// ################################################## Client ###########################################################
-// #####################################################################################################################
-
-//Parametry wywołania klienta
-//        Parametry wywołania klienta mogą być podawane w dowolnej kolejności. Jeśli parametr został podany więcej niż raz lub podano sprzeczne parametry, to obowiązuje pierwsze lub ostatnie wystąpienie takiego parametru na liście parametrów.
-//
-//-h <host>
-//        Określa adres IP lub nazwę hosta serwera. Parametr jest obowiązkowy.
-//
-//-p <port>
-//        Określa numer portu, na którym nasłuchuje serwer. Parametr jest obowiązkowy.
-//
-//-4
-//Wymusza w komunikacji z serwerem użycie IP w wersji 4. Parametr jest opcjonalny.
-//
-//-6
-//Wymusza w komunikacji z serwerem użycie IP w wersji 6. Parametr jest opcjonalny.
-//
-//Jeśli nie podano ani parametru -4, ani -6, to wybór wersji protokołu IP należy scedować na wywołanie funkcji getaddrinfo, podając ai_family = AF_UNSPEC.
-//
-//                                                                                                                                              -N
-//                                                                                                                                              -E
-//                                                                                                                                              -S
-//                                                                                                                                              -W
-//Określa miejsce, które klient chce zająć przy stole. Parametr jest obowiązkowy.
-//
-//-a
-//        Parametr jest opcjonalny. Jeśli jest podany, to klient jest automatycznym graczem. Jeśli nie jest podany, to klient jest pośrednikiem między serwerem a graczem-użytkownikiem.
-//
-
-
-
-// #####################################################################################################################
 
 int main(int argc, char** argv) {
     install_sigpipe_handler();
