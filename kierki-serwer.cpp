@@ -93,10 +93,6 @@ int countPoints(const std::vector<Card>& cards, DealType dealType, int trickNumb
                 if (card.value == CardValue::King && card.suit == CardSuit::Hearts)
                     points += 18;
                 break;
-            case DealType::No7AndLastTrick:
-                if (trickNumber == Trick::LastTrickNumber || trickNumber == 7)
-                    points += 10;
-                break;
             case DealType::Robber:
                 if (card.suit == CardSuit::Hearts)
                     points += 1;
@@ -110,12 +106,15 @@ int countPoints(const std::vector<Card>& cards, DealType dealType, int trickNumb
                     points += 10;
                 break;
             default:
-                break; // we'll handle Robber and NoTricks separately
+                break; // we'll handle the rest separately
         }
     }
 
     if (dealType == DealType::NoTricks || dealType == DealType::Robber)
         points += 1;
+    if ((dealType == DealType::No7AndLastTrick || dealType == DealType::Robber) &&
+        (trickNumber == 7 || trickNumber == Trick::LastTrickNumber))
+        points += 10;
 
     return points;
 }
