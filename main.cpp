@@ -450,7 +450,7 @@ Wszystkie listy w komunikatach dla użytkownika są wypisywane rozdzielone przec
 
 // helper function that results the string with the list of elements separated by the separator (with no trailing separator)
 template<class It>
-std::string formatList(It itFirst, It itEnd, std::function<std::string(decltype(*itFirst))> elementToStringConverters, const std::string& separator = ", ") {
+std::string listToString(It itFirst, It itEnd, std::function<std::string(decltype(*itFirst))> elementToStringConverters, const std::string& separator = ", ") {
     std::string result;
     for (decltype(itFirst++) it = itFirst; it != itEnd; ) {
         result += elementToStringConverters(*it);
@@ -462,8 +462,8 @@ std::string formatList(It itFirst, It itEnd, std::function<std::string(decltype(
     return result;
 }
 template<class T>
-std::string formatList(const std::vector<T>& list, std::function<std::string(T)> elementToStringConverter, const std::string& separator = ", ") {
-    return formatList(list.begin(), list.end(), elementToStringConverter, separator);
+std::string listToString(const std::vector<T>& list, std::function<std::string(T)> elementToStringConverter, const std::string& separator = ", ") {
+    return listToString(list.begin(), list.end(), elementToStringConverter, separator);
 }
 
 class Busy : public Msg {
@@ -479,10 +479,10 @@ public:
         return result;
     }
 
-    std::string toStringVerbose() const override {
+    [[nodiscard]] std::string toStringVerbose() const override {
         std::string result = this->toString();
         result += "Place busy, list of busy places received: ";
-        result += formatList<Seat>(busy_seats, [](const Seat& seat) { return ::toString(seat); });
+        result += listToString<Seat>(busy_seats, [](const Seat &seat) { return ::toString(seat); });
         result += ".\r\n";
         return result;
     }
@@ -501,6 +501,13 @@ public:
         }
         result += "\r\n";
         return result;
+    }
+
+    [[nodiscard]] std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "New deal " + std::to_string(static_cast<int>(dealType)) + ": starting place " + ::toString(firstSeat) + ", your cards: ";
+        result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
+        result += ".\r\n";
     }
 };
 
@@ -521,6 +528,15 @@ public:
         result += "\r\n";
         return result;
     }
+
+    // Caution! Available: <lista kart, które gracz jeszcze ma na ręce> - displayed by the caller!
+    [[nodiscard]] std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "Trick: (" + std::to_string(trickNumber) + ") ";
+        result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
+        result += "\r\n";
+        return result;
+    }
 };
 
 class Wrong : public Msg {
@@ -531,6 +547,11 @@ public:
     }
     [[nodiscard]] std::string toString() const override {
         return "WRONG" + std::to_string(trickNumber) + "\r\n";
+    }
+
+    [[nodiscard]] std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "Wrong message received in trick " + std::to_string(trickNumber) + ".\r\n";
     }
 };
 
@@ -564,6 +585,14 @@ public:
         result += "\r\n";
         return result;
     }
+    [[nodiscard]] std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "The scores are:\n";
+        for (const auto& [seat, score]: scores) {
+            result += ::toString(seat) + " | " + std::to_string(score) + "\n";
+        }
+        return result;
+    }
 };
 
 class Total : public Msg {
@@ -576,6 +605,14 @@ public:
             result += ::toString(seat) + std::to_string(score);
         }
         result += "\r\n";
+        return result;
+    }
+    [[nodiscard]] std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "The total scores are:\n";
+        for (const auto& [seat, score]: total_scores) {
+            result += ::toString(seat) + " | " + std::to_string(score) + "\n";
+        }
         return result;
     }
 };
@@ -1173,8 +1210,17 @@ struct PlayerStats {
         return 13 - hand.size() + 1;
     }
     DealType _currentDealType = DealType::Robber;
-    DealType getCurrentDealType() const {
+    [[nodiscard]] DealType getCurrentDealType() const {
         return _currentDealType;
+    }
+
+    [[nodiscard]] std::string handToString() const {
+        std::string result = "Available: ";
+        result += listToString(hand.begin(), hand.end(), [](Card card) {
+            return card.toString();
+        }, result);
+        result += "\r\n";
+        return result;
     }
 
     [[nodiscard]] bool hasCard(const Card& card) {
@@ -2001,19 +2047,20 @@ class Client {
 
         void _handleMessage(const std::string& raw) {
             if (raw == ShowHandCommand) {
-                auto cardsStr = formatList(stats->hand.begin(), stats->hand.end(), [] (const Card& card) { return card.toString(); });
+                auto cardsStr = listToString(stats->hand.begin(), stats->hand.end(),
+                                             [](const Card &card) { return card.toString(); });
                 Reporter::toUser("Cards in your hand: " + cardsStr + ".");
             }
             else if (raw == ShowTricksCommand) {
                 Reporter::toUser("Tricks taken in the last deal:");
                 for (const auto& cards: stats->tricks_taken) {
-                    Reporter::toUser(formatList<Card>(cards, [] (const Card& card) { return card.toString(); }));
+                    Reporter::toUser(listToString<Card>(cards, [](const Card &card) { return card.toString(); }));
                 }
                 Reporter::toUser("--- End of list ---");
             }
             else if (std::regex_match(raw, TrickRequestRegex)) {
                 // todo check if the user can send a trick request at the moment?
-                // parse the trick request
+                // parse the user trick request
                 auto cardStr = raw.substr(1);
                 auto card = Card(cardStr);
                 cardsToTrick.push(card);
@@ -2023,12 +2070,14 @@ class Client {
                 Reporter::logWarning("Unexpected message from the user: " + raw + " (skipping...)");
             }
         }
+
         void handleMessages() {
             while (StdIn.hasMessage()) {
                 auto raw = StdIn.readMessage();
                 _handleMessage(raw);
             }
         }
+
         void connectStdIn(pollfd* fd) {
             StdIn = PollBuffer(fd);
         }
@@ -2111,6 +2160,7 @@ class Client {
         }
     }
 
+
     void stateWaitForTrickWaitForPlayerTrick(const Trick& serverTrick) {
         _exit1IfServerError();
 
@@ -2120,6 +2170,8 @@ class Client {
             auto msg = Parser::parse(raw);
             if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
                 Reporter::toUser(trick->toStringVerbose());
+                // print available cards in hand
+                Reporter::toUser(stats.handToString());
             }
             else {
                 Reporter::logWarning("Unexpected message from the server: " + raw + " (skipping...)");
@@ -2189,6 +2241,7 @@ class Client {
         else if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
             // the server wants us to send the trick message
             Reporter::toUser(trick->toStringVerbose());
+            Reporter::toUser(stats.handToString());
             ChangeState([this, &trick] { stateWaitForTrickWaitForPlayerTrick(*trick); }); // very important! is to move to next state immediately
         }
         else {
