@@ -572,7 +572,7 @@ private:
         // If the current player is NOT the last one in the trick (4th player)...
         if (game.cardsOnTable.size() < 4) {
             game.currentPlayer = &players.at(nextSeat(game.currentPlayer->seat));
-            ChangeState([this] { stateSendTrick(); });
+            ChangeState([this] { stateSendTrick(); }, false);
             return;
         }
 
@@ -701,7 +701,7 @@ private:
         // 2) or else, if there was a timeout for the *current* player (only the current player can timeout):
         else if (time(nullptr) - game.currentPlayer->trickRequestTime > config.timeout_seconds) {
             Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " did not respond in time. ");
-            ChangeState([this] { stateSendTrick(); }, true);
+            ChangeState([this] { stateSendTrick(); }, false);
         }
 
     }
