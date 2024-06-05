@@ -114,26 +114,39 @@ struct sockaddr_storage get_server_address(char const *host, uint16_t port, int 
     return send_address;
 }
 
-void getSocketAddresses(int socket_fd, std::string& localIP, int& localPort, std::string& remoteIP, int& remotePort) {
+// Function that returns the string with ip and port of the given address (works for both IPv4 and IPv6)
+std::string getIPAndPort(const struct sockaddr_storage& address) {
+    if (address.ss_family == AF_INET) {
+        char ipstr[INET_ADDRSTRLEN];
+        inet_ntop(address.ss_family, &((struct sockaddr_in*)&address)->sin_addr, ipstr, sizeof(ipstr));
+        int port = ntohs(((struct sockaddr_in*)&address)->sin_port);
+        return std::string(ipstr) + ":" + std::to_string(port);
+    } else if (address.ss_family == AF_INET6) {
+        char ipstr[INET6_ADDRSTRLEN];
+        inet_ntop(address.ss_family, &((struct sockaddr_in6*)&address)->sin6_addr, ipstr, sizeof(ipstr));
+        int port = ntohs(((struct sockaddr_in6*)&address)->sin6_port);
+        return std::string(ipstr) + ":" + std::to_string(port);
+    }
+    return "<ip-port-unknown>";
+}
+
+void getSocketAddresses(int socket_fd, std::string& localIpPort, std::string& remoteIpPort) {
     struct sockaddr_storage local_address{}, remote_address{};
     socklen_t address_length = sizeof(struct sockaddr_storage);
 
     // Get local address
     if (getsockname(socket_fd, (struct sockaddr*)&local_address, &address_length) == -1) {
-        // Handle error
+        error("getsockname");
+        localIpPort = "<ip-port-unknown>";
     }
-    char ipstr[INET6_ADDRSTRLEN];
-    inet_ntop(local_address.ss_family, &local_address, ipstr, sizeof(ipstr));
-    localIP = ipstr;
-    localPort = ntohs(((struct sockaddr_in*)&local_address)->sin_port);
+    localIpPort = getIPAndPort(local_address);
 
     // Get remote address
     if (getpeername(socket_fd, (struct sockaddr*)&remote_address, &address_length) == -1) {
-        // Handle error
+        error("getpeername");
+        remoteIpPort = "<ip-port-unknown>";
     }
-    inet_ntop(remote_address.ss_family, &remote_address, ipstr, sizeof(ipstr));
-    remoteIP = ipstr;
-    remotePort = ntohs(((struct sockaddr_in*)&remote_address)->sin_port);
+    remoteIpPort = getIPAndPort(remote_address);
 }
 
 // Function that returns the string with ip and port of the other side of the given socket (works for both IPv4 and IPv6)
@@ -145,10 +158,8 @@ std::string getSocketIPAndPort(int socket_fd) {
     if (getpeername(socket_fd, (struct sockaddr*)&address, &address_length) == -1) {
         return "<ip-port-unknown>";
     }
-    char ipstr[INET6_ADDRSTRLEN];
-    inet_ntop(address.ss_family, &address, ipstr, sizeof(ipstr));
-    int port = ntohs(((struct sockaddr_in*)&address)->sin_port);
-    return std::string(ipstr) + ":" + std::to_string(port);
+    // Get the IP and port of the remote side
+    return getIPAndPort(address);
 }
 
 void install_signal_handler(int signal, void (*handler)(int), int flags) {
@@ -221,10 +232,10 @@ struct Color {
 class Reporter {
 public:
     static void debug(std::string color, std::string message) {
-        std::cerr << color << message << Color::Reset << std::endl;
+        std::cerr << color << message << Color::Reset << std::endl << std::flush;
     }
     static void error(std::string message) {
-        std::cerr << "[------------]" << Color::Red << message << Color::Reset << std::endl;
+        std::cerr << "############### " << Color::Red << message << Color::Reset << " ###############" << std::endl;
     }
     static void log(std::string message) {
         std::cerr << Color::Green << message << Color::Reset << std::endl;
@@ -236,17 +247,18 @@ public:
         std::cerr << Color::Yellow << "[Warning] " << Color::Reset << message << std::endl;
     }
 
-    static void report(const std::string &senderIP, int senderPort, const std::string &receiverIP, int receiverPort,
+    static void report(const std::string &senderIpPort, const std::string &receiverIpPort,
                        const std::string &time, const std::string &message) {
-        std::cout << "[" << senderIP << ":" << senderPort << "," << receiverIP << ":" << receiverPort << "," << time
-                  << "] " << message << std::endl;
+        std::cerr << std::flush;
+        std::cout << "[" << senderIpPort << "," << receiverIpPort << "," << time << "] " << message << std::flush; // << std::endl;
+        std::cerr << std::flush;
     }
     static void toUser(const std::string &message) {
         std::cout << message << std::endl;
     }
 };
 
-// ------ Seat enum with nextSeat and toString functions ------
+// ------ Seat enum with nextSeat and seatToString functions ------
 enum class Seat {
     N = 'N',
     E = 'E',
@@ -262,7 +274,7 @@ Seat nextSeat(Seat seat) {
     }
     throw std::invalid_argument("Invalid seat");
 }
-std::string toString(Seat seat) {
+std::string seatToString(Seat seat) {
     switch (seat) {
         case Seat::N: return "N";
         case Seat::E: return "E";
@@ -398,6 +410,9 @@ public:
                 default: throw std::invalid_argument("Invalid card suit");
             }
         }
+        else {
+            throw std::invalid_argument("Invalid card string");
+        }
     }
 };
 
@@ -417,7 +432,7 @@ public:
     Seat seat;
     explicit IAm(Seat seat) : seat(seat) {}
     [[nodiscard]] std::string toString() const override {
-        return "IAM" + ::toString(seat) + "\r\n";
+        return "IAM" + ::seatToString(seat) + "\r\n";
     }
 };
 /*
@@ -471,7 +486,7 @@ public:
     [[nodiscard]] std::string toString() const override {
         std::string result = "BUSY";
         for (const auto& seat: busy_seats) {
-            result += ::toString(seat);
+            result += ::seatToString(seat);
         }
         result += "\r\n";
         return result;
@@ -480,7 +495,7 @@ public:
     [[nodiscard]] std::string toStringVerbose() const override {
         std::string result = this->toString();
         result += "Place busy, list of busy places received: ";
-        result += listToString<Seat>(busy_seats, [](const Seat &seat) { return ::toString(seat); });
+        result += listToString<Seat>(busy_seats, [](const Seat &seat) { return ::seatToString(seat); });
         result += ".\r\n";
         return result;
     }
@@ -493,7 +508,7 @@ public:
     std::vector<Card> cards;
     Deal(DealType dealType, Seat firstSeat, std::vector<Card> cards) : dealType(dealType), firstSeat(firstSeat), cards(std::move(cards)) {}
     [[nodiscard]] std::string toString() const override {
-        std::string result = "DEAL" + std::to_string(static_cast<int>(dealType)) + ::toString(firstSeat);
+        std::string result = "DEAL" + std::to_string(static_cast<int>(dealType)) + ::seatToString(firstSeat);
         for (const auto& card: cards) {
             result += card.toString();
         }
@@ -503,7 +518,8 @@ public:
 
     [[nodiscard]] std::string toStringVerbose() const override {
         std::string result = this->toString();
-        result += "New deal " + std::to_string(static_cast<int>(dealType)) + ": starting place " + ::toString(firstSeat) + ", your cards: ";
+        result += "New deal " + std::to_string(static_cast<int>(dealType)) + ": staring place " +
+                ::seatToString(firstSeat) + ", your cards: ";
         result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
         result += ".\r\n";
         return result;
@@ -528,7 +544,7 @@ public:
         return result;
     }
 
-    // Caution! Available: <lista kart, które gracz jeszcze ma na ręce> - displayed by the caller!
+    // CAUTION! The message 'Available: <lista kart, które gracz jeszcze ma na ręce>' should be printed by the caller!
     [[nodiscard]] std::string toStringVerbose() const override {
         std::string result = this->toString();
         result += "Trick: (" + std::to_string(trickNumber) + ") ";
@@ -568,7 +584,15 @@ public:
         for (const auto & card : cardsOnTable) {
             result += card.toString();
         }
-        result += ::toString(takerSeat) + "\r\n";
+        result += ::seatToString(takerSeat) + "\r\n";
+        return result;
+    }
+
+    [[nodiscard]] std::string toStringVerbose() const override {
+        std::string result = this->toString();
+        result += "A trick " + std::to_string(trickNumber) + " is taken by " + ::seatToString(takerSeat) + ", cards ";
+        result += listToString<Card>(cardsOnTable, [](const Card &card) { return card.toString(); });
+        result += ".\r\n";
         return result;
     }
 };
@@ -580,7 +604,7 @@ public:
     [[nodiscard]] std::string toString() const override {
         std::string result = "SCORE";
         for (const auto& [seat, score]: scores) {
-            result += ::toString(seat) + std::to_string(score);
+            result += ::seatToString(seat) + std::to_string(score);
         }
         result += "\r\n";
         return result;
@@ -589,7 +613,7 @@ public:
         std::string result = this->toString();
         result += "The scores are:\n";
         for (const auto& [seat, score]: scores) {
-            result += ::toString(seat) + " | " + std::to_string(score) + "\n";
+            result += ::seatToString(seat) + " | " + std::to_string(score) + "\n";
         }
         return result;
     }
@@ -602,7 +626,7 @@ public:
     [[nodiscard]] std::string toString() const override {
         std::string result = "TOTAL";
         for (const auto& [seat, score]: total_scores) {
-            result += ::toString(seat) + std::to_string(score);
+            result += ::seatToString(seat) + std::to_string(score);
         }
         result += "\r\n";
         return result;
@@ -611,7 +635,7 @@ public:
         std::string result = this->toString();
         result += "The total scores are:\n";
         for (const auto& [seat, score]: total_scores) {
-            result += ::toString(seat) + " | " + std::to_string(score) + "\n";
+            result += ::seatToString(seat) + " | " + std::to_string(score) + "\n";
         }
         return result;
     }
@@ -636,12 +660,13 @@ public:
         std::smatch match;
 
         try {
+            const std::string card_non_capturing_regex = "(?:(?:10|[23456789JQKA])[CDHS])";
             std::regex IAM_regex(R"(^IAM([NESW])\r\n$)");
             std::regex BUSY_regex(R"(^BUSY([NESW]+)\r\n$)");
             std::regex DEAL_regex(R"(^DEAL([1-7])([NESW])(((10|[23456789JQKA])[CDHS]){13})\r\n$)");
             std::regex TRICK_regex(R"(^TRICK([1-9]|1[0-3])(((10|[23456789JQKA])[CDHS]){0,3})\r\n$)");
             std::regex WRONG_regex(R"(^WRONG([1-9]|1[0-3])\r\n$)");
-            std::regex TAKEN_regex(R"(^TAKEN([1-9]|1[0-3])((10|[23456789JQKA])[CDHS]){4}([NESW])\r\n$)");
+            std::regex TAKEN_regex(R"(^TAKEN([1-9]|1[0-3])((?:(?:10|[23456789JQKA])[CDHS]){4})([NESW])\r\n$)");
             std::regex SCORE_regex(R"(^SCORE([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)\r\n$)");
             std::regex TOTAL_regex(R"(^TOTAL([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)([NESW])(\d+)\r\n$)");
 
@@ -664,17 +689,8 @@ public:
             } else if (std::regex_match(message, match, DEAL_regex)) {
                 DealType dealType = static_cast<DealType>(std::stoi(match[1].str()));
                 Seat firstSeat = Seat(match[2].str()[0]);
-                std::vector<Card> cards;
                 std::string cardsStr = match[3].str();
-                std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
-                std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
-                std::sregex_iterator end;
-                while (it != end) {
-                    std::smatch card_match = *it;
-                    std::string cardStr = card_match.str();
-                    cards.push_back(Card(cardStr));
-                    ++it;
-                }
+                std::vector<Card> cards = parseCards(cardsStr);
                 // ensure that there are no repeated cards
                 std::set<Card> cardsSet(cards.begin(), cards.end());
                 if (cards.size() != cardsSet.size()) {
@@ -684,35 +700,17 @@ public:
                 return std::make_shared<Deal>(dealType, firstSeat, cards);
             } else if (std::regex_match(message, match, TRICK_regex)) {
                 int trickNumber = std::stoi(match[1].str());
-                std::vector<Card> cards;
                 std::string cardsStr = match[2].str();
-                std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
-                std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
-                std::sregex_iterator end;
-                while (it != end) {
-                    std::smatch card_match = *it;
-                    std::string cardStr = card_match.str();
-                    cards.push_back(Card(cardStr));
-                    ++it;
-                }
+                auto cards = parseCards(cardsStr);
                 return std::make_shared<Trick>(trickNumber, cards);
             } else if (std::regex_match(message, match, WRONG_regex)) {
                 int trickNumber = std::stoi(match[1].str());
                 return std::make_shared<Wrong>(trickNumber);
             } else if (std::regex_match(message, match, TAKEN_regex)) {
                 int trickNumber = std::stoi(match[1].str());
-                std::vector<Card> cards;
                 std::string cardsStr = match[2].str();
-                std::regex card_regex(R"(((10|[23456789JQKA])([CDHS])))");
-                std::sregex_iterator it(cardsStr.begin(), cardsStr.end(), card_regex);
-                std::sregex_iterator end;
-                while (it != end) {
-                    std::smatch card_match = *it;
-                    std::string cardStr = card_match.str();
-                    cards.push_back(Card(cardStr));
-                    ++it;
-                }
-                Seat takerSeat = Seat(match[4].str()[0]);
+                auto cards = parseCards(cardsStr);
+                Seat takerSeat = Seat(match[3].str()[0]);
                 return std::make_shared<Taken>(trickNumber, cards, takerSeat);
             } else if (std::regex_match(message, match, SCORE_regex)) {
                 std::unordered_map<Seat, int> scores;
@@ -856,7 +854,7 @@ public:
 
     void update() {
         if (!isConnected()) {
-            Reporter::error("Tried to updateBuffers a disconnected client.");
+            Reporter::error("Tried to update a disconnected buffer.");
             return;
         }
         // check if any error occurred and if so, the buffer is broken and the client should be disconnected and his data cleared
@@ -889,9 +887,9 @@ public:
         buffer_in.erase(0, pos + buffer_in_msg_separator.size());
 
         if (reporting_enabled) {
-            std::string localIP, remoteIP; int localPort, remotePort;
-            getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
-            Reporter::report(remoteIP, remotePort, localIP, localPort, getCurrentTime(), message);
+            std::string localIpPort, remoteIpPort;
+            getSocketAddresses(pollfd->fd, localIpPort,remoteIpPort);
+            Reporter::report(remoteIpPort, localIpPort, getCurrentTime(), message);
         }
 
         return message;
@@ -907,9 +905,9 @@ public:
         pollfd->events |= POLLOUT; // add the POLLOUT flag
 
         if (reporting_enabled) {
-            std::string localIP, remoteIP; int localPort, remotePort;
-            getSocketAddresses(pollfd->fd, localIP, localPort, remoteIP, remotePort);
-            Reporter::report(localIP, localPort, remoteIP, remotePort, getCurrentTime(), message);
+            std::string localIpPort, remoteIpPort;
+            getSocketAddresses(pollfd->fd, localIpPort,remoteIpPort);
+            Reporter::report(localIpPort, remoteIpPort, getCurrentTime(), message);
         }
     }
 
@@ -965,11 +963,11 @@ struct PlayerStats {
         return _currentDealType;
     }
 
-    [[nodiscard]] std::string handToString() const {
+    [[nodiscard]] std::string availableCardsToString() const {
         std::string result = "Available: ";
         result += listToString(hand.begin(), hand.end(), [](Card card) {
             return card.toString();
-        }, result);
+        }, ", ");
         result += "\r\n";
         return result;
     }

@@ -2,8 +2,8 @@
 
 
 struct DealConfig {
-    DealType dealType;
-    Seat firstSeat;
+    DealType dealType{};
+    Seat firstSeat{};
     std::unordered_map<Seat, std::vector<Card>> cards;
 };
 
@@ -37,6 +37,19 @@ private:
             }
             deals.push_back(dealConfig);
         }
+
+        // print what the server has read from the file
+        Reporter::log("Read " + std::to_string(deals.size()) + " deals from file: " + filename);
+        for (const auto& deal: deals) {
+            Reporter::log("Deal: " + std::to_string(static_cast<int>(deal.dealType)) + " " +
+                                  ::seatToString(deal.firstSeat));
+            for (const auto& [seat, cards]: deal.cards) {
+                Reporter::log("  " + ::seatToString(seat) + ": " + listToString<Card>(cards, [](const Card& c) { return c.toString(); }));
+            }
+        }
+
+
+        return deals;
     }
 public:
     std::optional<int> port;
@@ -66,6 +79,12 @@ public:
         }
         catch (std::invalid_argument& e) {
             Reporter::error("Argument error: " + std::string(e.what()));
+            exit(1);
+        }
+
+        // check if all required arguments are present
+        if (config.deals.empty()) {
+            Reporter::logError("No deals provided. Usage: " + std::string(argv[0]) + " -f <filename> [-p <port>] [-t <timeout_seconds>]");
             exit(1);
         }
 
@@ -125,7 +144,7 @@ private:
     ServerConfig config;
 
     struct Polling {
-        static constexpr int Connections = 32;
+        static constexpr int Connections = 8;
         // initialize the pollfd array with values {.fd = -1, .events = 0, .revents = 0}
         std::array<struct pollfd, Connections> fds{};
         const int fdAcceptIdx = 0;
@@ -245,7 +264,12 @@ private:
         for (auto &fd: poll.fds) {
             fd.revents = 0;
         }
-        ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
+
+        Reporter::debug(Color::Yellow, "Polling...");
+        int fds_with_events = ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
+        if (fds_with_events < 0) { syserr("poll"); }
+        Reporter::debug(Color::Yellow, "Poll returned with " + std::to_string(fds_with_events) + " fds with events.");
+
         for (auto &[seat, player]: players) {
             if (player.buffer.isConnected())
                 player.buffer.update();
@@ -253,6 +277,8 @@ private:
         for (auto &candidate: poll.candidates) {
             candidate.buffer.update();
         }
+
+        Reporter::debug(Color::Magenta, "Poll updated buffers. \n");
     }
 
     void _updateDisconnections() {
@@ -262,7 +288,7 @@ private:
                 if (player.buffer.hasError()) {
                     // disconnect the player
                     player.buffer.disconnect();
-                    Reporter::debug(Color::Red, "Player " + ::toString(seat) + " disconnected.");
+                    Reporter::debug(Color::Red, "Player " + ::seatToString(seat) + " disconnected.");
                 }
             }
         }
@@ -309,7 +335,7 @@ private:
                 }
             }
             // or close the connection
-            Reporter::error("Is this a DDoS attack? No free pollfd for candidate.");
+            Reporter::error("Is this a DoS attack? No free pollfd for candidate.");
             close(client_fd);
         }
     }
@@ -325,7 +351,7 @@ private:
             new_player.buffer.writeMessage(taken);
         }
 
-        Reporter::debug(Color::Green, "Player " + ::toString(seat) + " connected and updated with history of (" + std::to_string(game.takenHistory.size()) + ") taken cards.");
+        Reporter::debug(Color::Green, "Player " + ::seatToString(seat) + " connected and updated with history of (" + std::to_string(game.takenHistory.size()) + ") taken cards.");
         assert(players.at(seat).isConnected());
     }
 
@@ -419,10 +445,9 @@ private:
                 Reporter::debug(Color::Green, "Safe poll finished. All players connected!");
                 return;
             }
-            Reporter::debug(Color::Yellow, "Waiting for all players to connect...");
+//            Reporter::debug(Color::Yellow, "Waiting for all players to connect...");
         }
     }
-
 
     struct GameData {
         std::vector<DealConfig>::iterator currentDeal;
@@ -435,7 +460,7 @@ private:
         Seat trickWinnerSeat{};
 
         // Assume: trickNumber is set for the current trick.
-        Seat getStartingSeat() const {
+        [[nodiscard]] Seat getStartingSeat() const {
             if (trickNumber == Trick::FirstTrickNumber) {
                 return currentDeal->firstSeat;
             }
@@ -443,10 +468,7 @@ private:
         }
     } game;
 
-
-    // ------------------------------------------- State machine -------------------------------------------
-
-    // ===================================================================================================
+    // ======================================= State machine =============================================
     // variable pointing to function that handles current state (use wrappers not raw function pointers)
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
     // whether the state should updateBuffers poll before calling the state function
@@ -464,10 +486,10 @@ private:
             if (player.buffer.hasMessage() && seat != game.currentPlayer->seat) {
                 auto msg = Parser::parse(player.buffer.readMessage());
                 if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
-                    Reporter::logWarning("Player " + ::toString(seat) + " sent a TRICK message, but it's not his turn.");
+                    Reporter::logWarning("Player " + ::seatToString(seat) + " sent a TRICK message, but it's not his turn.");
                     player.buffer.writeMessage(Wrong(game.trickNumber));
                 } else {
-                    Reporter::logError("Player " + ::toString(seat) + ": unexpected message received. Closing connection.");
+                    Reporter::logError("Player " + ::seatToString(seat) + ": unexpected message received. Closing connection.");
                     player.disconnect();
                 }
             }
@@ -531,14 +553,14 @@ private:
         for (auto& [seat, player]: players) {
             player.buffer.flush(); // very important! this can block, but it's the last message anyway
             player.disconnect();
-            Reporter::log("Player " + ::toString(seat) + " disconnected.");
+            Reporter::log("Player " + ::seatToString(seat) + " disconnected.");
         }
 
         Reporter::log("Exiting the server... o7");
         exit(0);
     }
     // TRICK -> N   | safePoll | wait (no msg) | safePoll | wait (no msg) | safePoll (N disconnected, N connected) | wait (no msg) - timeout - RESEND TRICK -> N |
-    bool isDealResultDetermined() {
+    bool isDealResultDetermined() const {
         return game.trickNumber == Trick::LastTrickNumber;
     }
 
@@ -590,28 +612,28 @@ private:
 
         // Syntax check: TRICK message
         if (trick == nullptr) {
-            Reporter::logError("Player " + ::toString(game.currentPlayer->seat) + ": unexpected message received. Closing connection.");
+            Reporter::logError("Player " + ::seatToString(game.currentPlayer->seat) + ": unexpected message received. Closing connection.");
             game.currentPlayer->disconnect();
             return; // and keep the WaitForTrick state
         }
 
         // Semantic check: trick number is correct
         if (trick->trickNumber != game.trickNumber) {
-            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with incorrect trick number.");
+            Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " sent a TRICK message with incorrect trick number.");
             game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
             return; // and keep the WaitForTrick state
         }
 
         // Semantic check: trick has exactly 1 card
         if (trick->cards.size() != 1) {
-            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with " + std::to_string(trick->cards.size()) + " cards.");
+            Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " sent a TRICK message with " + std::to_string(trick->cards.size()) + " cards.");
             game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
             return; // and keep the WaitForTrick state
         }
 
         // Semantic check: player has the card in his hand
         if (!game.currentPlayer->stats.hasCard(trick->cards[0])) {
-            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with a card he doesn't have.");
+            Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " sent a TRICK message with a card he doesn't have.");
             game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
             return; // and keep the WaitForTrick state
         }
@@ -620,7 +642,7 @@ private:
         // check if the player has any cards of the first card's suit
         if (!game.cardsOnTable.empty() && trick->cards[0].suit != game.cardsOnTable[0].suit) {
             if (game.currentPlayer->stats.hasSuit(game.cardsOnTable[0].suit)) {
-                Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " sent a TRICK message with a card of a different suit than the first card (but HAD a card of the first card's suit).");
+                Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " sent a TRICK message with a card of a different suit than the first card (but HAD a card of the first card's suit).");
                 game.currentPlayer->buffer.writeMessage(Wrong(game.trickNumber));
                 return; // and keep the WaitForTrick state
             }
@@ -678,7 +700,7 @@ private:
         }
         // 2) or else, if there was a timeout for the *current* player (only the current player can timeout):
         else if (time(nullptr) - game.currentPlayer->trickRequestTime > config.timeout_seconds) {
-            Reporter::logWarning("Player " + ::toString(game.currentPlayer->seat) + " did not respond in time. ");
+            Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " did not respond in time. ");
             ChangeState([this] { stateSendTrick(); }, true);
         }
 
@@ -715,8 +737,6 @@ private:
         }
     }
 
-    // -------------------------------------------------------------------------------------------------
-
 public:
     explicit Server(ServerConfig _config): config(std::move(_config)) {
         state = [this] { std::runtime_error("Server state is not set.");};
@@ -743,27 +763,43 @@ public:
 
 int main(int argc, char** argv) {
     install_sigpipe_handler();
-//    testParser();
-    Busy b({Seat::N, Seat::E, Seat::S, Seat::W});
-    Reporter::toUser(b.toStringVerbose());
 
-//    ServerConfig config = ServerConfig::FromArgs(argc, argv);
-    ServerConfig config {
-            .port = 1234,
-            .deals = {
-                     {
-                            .dealType = DealType::No7AndLastTrick,
-                            .firstSeat = Seat::N,
-                            .cards = {
-                                    {Seat::N, {Card("2C"), Card("3C"), Card("4C"), Card("5C"), Card("6C"), Card("7C"), Card("8C"), Card("9C"), Card("10C"), Card("JC"), Card("QC"), Card("KC"), Card("AC")}},
-                                    {Seat::E, {Card("2D"), Card("3D"), Card("4D"), Card("5D"), Card("6D"), Card("7D"), Card("8D"), Card("9D"), Card("10D"), Card("JD"), Card("QD"), Card("KD"), Card("AD")}},
-                                    {Seat::S, {Card("2H"), Card("3H"), Card("4H"), Card("5H"), Card("6H"), Card("7H"), Card("8H"), Card("9H"), Card("10H"), Card("JH"), Card("QH"), Card("KH"), Card("AH")}},
-                                    {Seat::W, {Card("2S"), Card("3S"), Card("4S"), Card("5S"), Card("6S"), Card("7S"), Card("8S"), Card("9S"), Card("10S"), Card("JS"), Card("QS"), Card("KS"), Card("AS")}}
-                            }
-                    }
-            }
-    };
-
+    ServerConfig config = ServerConfig::FromArgs(argc, argv);
     Server server(config);
     server.run();
+
+
+//    ServerConfig config {
+//            .port = 1234,
+//            .deals = {
+//                     {
+//                            .dealType = DealType::No7AndLastTrick,
+//                            .firstSeat = Seat::N,
+//                            .cards = {
+//                                    {Seat::N, {Card("2C"), Card("3C"), Card("4C"), Card("5C"), Card("6C"), Card("7C"), Card("8C"), Card("9C"), Card("10C"), Card("JC"), Card("QC"), Card("KC"), Card("AC")}},
+//                                    {Seat::E, {Card("2D"), Card("3D"), Card("4D"), Card("5D"), Card("6D"), Card("7D"), Card("8D"), Card("9D"), Card("10D"), Card("JD"), Card("QD"), Card("KD"), Card("AD")}},
+//                                    {Seat::S, {Card("2H"), Card("3H"), Card("4H"), Card("5H"), Card("6H"), Card("7H"), Card("8H"), Card("9H"), Card("10H"), Card("JH"), Card("QH"), Card("KH"), Card("AH")}},
+//                                    {Seat::W, {Card("2S"), Card("3S"), Card("4S"), Card("5S"), Card("6S"), Card("7S"), Card("8S"), Card("9S"), Card("10S"), Card("JS"), Card("QS"), Card("KS"), Card("AS")}}
+//                            }
+//                    }
+//            }
+//    };
+    /*
+    Example config file:
+6N
+2C3C4C5C6C7C8C9C10CJCQC
+2D3D4D5D6D7D8D9D10DJDQD
+2H3H4H5H6H7H8H9H10HJHQH
+2S3S4S5S6S7S8S9S10SJSQS
+1N
+2C3C4C5C6C7C8C9C10CJCQC
+2D3D4D5D6D7D8D9D10DJDQD
+2H3H4H5H6H7H8H9H10HJHQH
+2S3S4S5S6S7S8S9S10SJSQS
+2E
+2H3H4H5H6H7H8H9H10HJHQH
+2S3S4S5S6S7S8S9S10SJSQS
+2C3C4C5C6C7C8C9C10CJCQC
+2D3D4D5D6D7D8D9D10DJDQD
+    */
 }

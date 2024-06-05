@@ -11,8 +11,8 @@ OBJS_SERVER = obj/$(SRCS_SERVER:.cpp=.o)
 OBJS_CLIENT = obj/$(SRCS_CLIENT:.cpp=.o)
 
 # Executable name
-EXEC_SERVER = server
-EXEC_CLIENT = client
+EXEC_SERVER = kierki-serwer
+EXEC_CLIENT = kierki-klient
 
 all: $(EXEC_SERVER) $(EXEC_CLIENT)
 
