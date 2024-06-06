@@ -146,10 +146,13 @@ private:
     struct Polling {
         static constexpr int Connections = 8;
         // initialize the pollfd array with values {.fd = -1, .events = 0, .revents = 0}
-        std::array<struct pollfd, Connections> fds{};
+        // std::array<struct pollfd, Connections> fds = {{.fd = -1, .events = 0, .revents = 0 }};
+        struct pollfd fds[Connections];
         const int fdAcceptIdx = 0;
         Polling() {
-            for (auto& fd: fds) {
+            // for (auto& fd: fds) {
+            for (int i = 0; i < Connections; i++) {
+                auto& fd = fds[i];
                 fd.fd = -1;
                 fd.events = 0;
                 fd.revents = 0;
@@ -266,7 +269,8 @@ private:
         }
 
         Reporter::debug(Color::Yellow, "Polling...");
-        int fds_with_events = ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
+        // int fds_with_events = ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
+        int fds_with_events = ::poll(poll.fds, Polling::Connections, config.timeout_seconds * 1000 / 2.5);
         if (fds_with_events < 0) { syserr("poll"); }
         Reporter::debug(Color::Yellow, "Poll returned with " + std::to_string(fds_with_events) + " fds with events.");
 

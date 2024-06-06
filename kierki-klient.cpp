@@ -98,7 +98,7 @@ public:
 class Client {
     // data
     ClientConfig config;
-    std::array<pollfd, 3> fds{pollfd{.fd = -1, .events = 0, .revents = 0}, pollfd{.fd = -1, .events = 0, .revents = 0},
+    struct pollfd fds[3] = {pollfd{.fd = -1, .events = 0, .revents = 0}, pollfd{.fd = -1, .events = 0, .revents = 0},
                               pollfd{.fd = -1, .events = 0, .revents = 0}};
     const int fdServerIdx = 0;
     const int fdStdinIdx = 1;
@@ -419,7 +419,7 @@ class Client {
         }
 
         Reporter::debug(Color::Yellow, "Polling...");
-        int fds_with_events = ::poll(fds.data(), fds.size(), 1000 * 10); // blocking
+        int fds_with_events = ::poll(fds, 3, 1000 * 10); // blocking
         if (fds_with_events < 0) { syserr("poll"); }
         Reporter::debug(Color::Blue, "Poll returned with " + std::to_string(fds_with_events) + " fds with events.");
 
