@@ -35,6 +35,8 @@
 #include <unordered_set>
 #include <fstream>
 #include <queue>
+#include <chrono>
+#include <iomanip>
 
 
 // ------------------------- Common functions -------------------------
@@ -209,14 +211,16 @@ std::string listToString(const std::vector<T>& list, std::function<std::string(T
 }
 
 // Function that returns the string with time in a format like this: 2024-04-25T18:21:00.010 (with parts of seconds)
+// https://gist.github.com/bschlinker/844a88c09dcf7a61f6a8df1e52af7730
 std::string getCurrentTime() {
-    struct timespec ts{};
-    clock_gettime(CLOCK_REALTIME, &ts);
-    char timeStr[30];
-    strftime(timeStr, sizeof(timeStr), "%Y-%m-%dT%H:%M:%S", localtime(&ts.tv_sec));
-    char msStr[5];
-    sprintf(msStr, ".%03ld", ts.tv_nsec / 1000000);
-    return std::string(timeStr) + msStr;
+    const auto now = std::chrono::system_clock::now();
+    const auto nowAsTimeT = std::chrono::system_clock::to_time_t(now);
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+    std::stringstream nowSs;
+    nowSs << std::put_time(std::localtime(&nowAsTimeT), "%FT%T")
+          << '.' << std::setfill('0') << std::setw(3) << nowMs.count();
+    return nowSs.str();
 }
 
 // ----------------------------------- Common classes -----------------------------------
