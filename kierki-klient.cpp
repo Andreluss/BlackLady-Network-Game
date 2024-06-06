@@ -220,7 +220,7 @@ class Client {
 
     void setup_poll_and_buffers() {
         fds[fdServerIdx].fd = server_socket();
-        Server = PollBuffer(&fds[fdServerIdx]);
+        Server = PollBuffer(&fds[fdServerIdx], config.isAutomatic);
 
         if (not config.isAutomatic) {
             fds[fdStdinIdx].fd = STDIN_FILENO;
@@ -363,6 +363,7 @@ class Client {
         if (auto taken = std::dynamic_pointer_cast<Taken>(msg)) {
             Reporter::toUser(taken->toStringVerbose());
             _updateStatsWithTaken(taken); // we are receiving a history of this seat's player, updateBuffers the stats
+            stateWaitForTrick(); // don't repoll stay in this state until there's no more Taken messages
         }
         else if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
             // the server wants us to send the trick message

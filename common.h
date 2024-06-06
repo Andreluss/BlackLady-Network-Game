@@ -1,6 +1,8 @@
 #ifndef UNTITLED4_COMMON_H
 #define UNTITLED4_COMMON_H
 
+#define BlackLadyDebug 0
+
 // ------------------------- Common includes -------------------------
 
 #include <stdexcept>
@@ -232,6 +234,7 @@ struct Color {
 class Reporter {
 public:
     static void debug(std::string color, std::string message) {
+        if (not BlackLadyDebug) return;
         std::cerr << color << message << Color::Reset << std::endl << std::flush;
     }
     static void error(std::string message) {
@@ -249,9 +252,9 @@ public:
 
     static void report(const std::string &senderIpPort, const std::string &receiverIpPort,
                        const std::string &time, const std::string &message) {
-        std::cerr << std::flush;
+        if (BlackLadyDebug) std::cerr << std::flush;
         std::cout << "[" << senderIpPort << "," << receiverIpPort << "," << time << "] " << message << std::flush; // << std::endl;
-        std::cerr << std::flush;
+        if (BlackLadyDebug) std::cerr << std::flush;
     }
     static void toUser(const std::string &message) {
         std::cout << message << std::endl;
@@ -549,7 +552,7 @@ public:
         std::string result = this->toString();
         result += "Trick: (" + std::to_string(trickNumber) + ") ";
         result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
-        result += "\r\n";
+        result += "." /*"\r\n"*/;
         return result;
     }
 };
@@ -753,7 +756,7 @@ private:
             return true;
         }
         if (pollfd->revents & POLLHUP) {
-            Reporter::debug(Color::Red, "What the hell - POLLHUP after POLLERR detected.");
+            Reporter::debug(Color::Red, "POLLHUP detected.");
             error = true;
             return true;
         }
@@ -968,7 +971,7 @@ struct PlayerStats {
         result += listToString(hand.begin(), hand.end(), [](Card card) {
             return card.toString();
         }, ", ");
-        result += "\r\n";
+//        result += "\r\n";
         return result;
     }
 
