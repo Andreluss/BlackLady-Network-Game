@@ -270,7 +270,7 @@ private:
 
         Reporter::debug(Color::Yellow, "Polling...");
         // int fds_with_events = ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
-        int fds_with_events = ::poll(poll.fds, Polling::Connections, config.timeout_seconds * 1000 / 2.5);
+        int fds_with_events = ::poll(poll.fds, Polling::Connections, 1000);
         if (fds_with_events < 0) { syserr("poll"); }
         Reporter::debug(Color::Yellow, "Poll returned with " + std::to_string(fds_with_events) + " fds with events.");
 
@@ -350,13 +350,24 @@ private:
         new_player.connect(std::move(candidate.buffer));
 
         // Send the whole deal history to the new player.
-        new_player.buffer.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat, game.currentDeal->cards[seat]));
-        for (auto& taken: game.takenHistory) {
-            new_player.buffer.writeMessage(taken);
-        }
+        if (game.byl_pierwszy_deal) {
+            new_player.buffer.writeMessage(Deal(game.currentDeal->dealType, game.currentDeal->firstSeat, game.currentDeal->cards[seat]));
+            for (auto& taken: game.takenHistory) {
+                new_player.buffer.writeMessage(taken);
+            }
 
-        Reporter::debug(Color::Green, "Player " + ::seatToString(seat) + " connected and updated with history of (" + std::to_string(game.takenHistory.size()) + ") taken cards.");
-        assert(players.at(seat).isConnected());
+            Reporter::debug(Color::Green, "Player " + ::seatToString(seat) + " connected and updated with history of (" + std::to_string(game.takenHistory.size()) + ") taken cards.");
+            assert(players.at(seat).isConnected());
+        }
+        else if (std::all_of(players.begin(), players.end(), [](const auto &p) { return p.second.isConnected(); })) {
+            Reporter::log("4th Player " + ::seatToString(seat) + "  connected! Starting DEALS sent to all players.");
+            game.byl_pierwszy_deal = true;
+            sendDealInfo(); // wyslanie pierwszych dealow - nie powinno byc zadnych taken jeszcze
+            assert(game.takenHistory.empty() && "Taken history should be empty at the beginning of the game.");
+        }
+        else {
+            Reporter::log("Player " + ::seatToString(seat) + " connected (but some players are still missing).");
+        }
     }
 
     bool _processCandidateWaitingForIAM(Polling::Candidate& candidate) {
@@ -462,6 +473,8 @@ private:
         Player* currentPlayer{};
 
         Seat trickWinnerSeat{};
+
+        bool byl_pierwszy_deal = false; // specjalnie po polsku, zeby wyifowac przypadek wysylania dealow na samym poczatku gry
 
         // Assume: trickNumber is set for the current trick.
         [[nodiscard]] Seat getStartingSeat() const {
