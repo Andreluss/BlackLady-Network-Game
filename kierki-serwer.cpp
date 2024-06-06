@@ -121,8 +121,6 @@ int countPoints(const std::vector<Card>& cards, DealType dealType, int trickNumb
                     points += 2;
                 if (card.value == CardValue::King && card.suit == CardSuit::Hearts)
                     points += 18;
-                if (trickNumber == Trick::LastTrickNumber || trickNumber == 7)
-                    points += 10;
                 break;
             default:
                 break; // we'll handle the rest separately
