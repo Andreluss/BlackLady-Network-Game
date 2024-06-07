@@ -41,6 +41,10 @@
 
 // ------------------------- Common functions -------------------------
 
+int64_t time_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 [[noreturn]] void syserr(const char* fmt, ...) {
     va_list fmt_args;
     int org_errno = errno;
@@ -947,13 +951,21 @@ public:
     }
     // Danger: this function is *blocking* to flush the whole output buffer!
     // It writes directly to the socket and waits until the whole buffer is written.
-    void flush() {
+    void flush(int timeout_s) {
         // Change the socket to blocking mode.
         // This is necessary to ensure that the whole buffer is written.
         int flags = fcntl(pollfd->fd, F_GETFL, 0);
         fcntl(pollfd->fd, F_SETFL, flags & ~O_NONBLOCK);
 
+        // temporarily set timeout to the socket to avoid blocking forever
+        timeval tv = { timeout_s, 0 } ;
+        setsockopt(pollfd->fd, SOL_SOCKET, SO_SNDTIMEO, (const void*)&tv, sizeof tv);
+
         _flushWrite();
+
+        // disable the timeout
+        tv = {0, 0};
+        setsockopt(pollfd->fd, SOL_SOCKET, SO_SNDTIMEO, (const void*)&tv, sizeof tv);
 
         // Change the socket back to non-blocking mode (if it was non-blocking before).
         fcntl(pollfd->fd, F_SETFL, flags);

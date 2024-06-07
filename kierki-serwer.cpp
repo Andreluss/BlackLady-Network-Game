@@ -6,6 +6,7 @@ struct DealConfig {
     Seat firstSeat{};
     std::unordered_map<Seat, std::vector<Card>> cards;
 };
+using time_ms_t = int64_t;
 
 class ServerConfig {
 private:
@@ -48,13 +49,14 @@ private:
             }
         }
 
-
         return deals;
     }
+    int timeout_seconds = 5;
 public:
     std::optional<int> port;
     std::vector<DealConfig> deals;
-    int timeout_seconds = 5;
+    [[nodiscard]] int timeout_s() const { return timeout_seconds; }
+    [[nodiscard]] time_ms_t timeout_ms() const { return timeout_seconds * 1000; }
 
     static ServerConfig FromArgs(int argc, char** argv) {
         ServerConfig config;
@@ -145,12 +147,11 @@ private:
         static constexpr int Connections = 8;
         // initialize the pollfd array with values {.fd = -1, .events = 0, .revents = 0}
         // std::array<struct pollfd, Connections> fds = {{.fd = -1, .events = 0, .revents = 0 }};
-        struct pollfd fds[Connections];
+        pollfd fds[Connections]{};
         const int fdAcceptIdx = 0;
         Polling() {
             // for (auto& fd: fds) {
-            for (int i = 0; i < Connections; i++) {
-                auto& fd = fds[i];
+            for (auto & fd : fds) {
                 fd.fd = -1;
                 fd.events = 0;
                 fd.revents = 0;
@@ -162,10 +163,10 @@ private:
                 WaitingForIAM,
                 Rejecting,
             } state;
-            time_t connectionTime{};
+            time_ms_t connectionTime_ms{};
 
             explicit Candidate(PollBuffer buffer, State state = State::WaitingForIAM)
-                    : buffer(std::move(buffer)), state(state), connectionTime(time(nullptr)) {}
+                    : buffer(std::move(buffer)), state(state), connectionTime_ms(time_ms()) {}
 
             explicit Candidate(struct pollfd* pollfd): Candidate(PollBuffer(pollfd)) {}
         };
@@ -232,7 +233,7 @@ private:
 
     struct Player {
         PollBuffer buffer;
-        time_t trickRequestTime{};
+        time_t trickRequestTime_ms{};
         Seat seat{};
         PlayerStats stats;
 
@@ -258,19 +259,47 @@ private:
             {Seat::W, Player(Seat::W, PollBuffer())}
     }; // in/out buffer wrappers for players (with a seat)
 
+    bool allPlayersConnected() {
+        return std::all_of(players.begin(), players.end(), [](const auto &p) { return p.second.isConnected(); });
+    }
 
 private:
+    time_ms_t _pollGetSensibleTimeout_ms() {
+        // enumerate over all connected candidates and the current player to find the smallest (but positive) timeout
+        auto timeout_ms = config.timeout_ms();
+        auto minimize_with_timeout_from = [&timeout_ms, this](time_ms_t start_time_ms) {
+            timeout_ms = std::min(timeout_ms, (start_time_ms + config.timeout_ms()) - time_ms());
+            //                                 ^^^^^^^^ how many ms left until timeout ^^^^^^^^^
+        };
+
+        // adjust the timeout, there are 2 cases:
+        // 1) all players are connected and the current player may have timeout
+        // 2) not all players are connected and the candidates may have timeout
+
+        if (allPlayersConnected() && game.currentPlayer) {
+            minimize_with_timeout_from(game.currentPlayer->trickRequestTime_ms);
+        }
+        else if (!allPlayersConnected()) {
+            for (auto& candidate : poll.candidates) {
+                if (candidate.buffer.isConnected()) {
+                    minimize_with_timeout_from(candidate.connectionTime_ms);
+                }
+            }
+        }
+
+        return std::max<time_ms_t>(0, timeout_ms);
+    }
     void _pollUpdate() {
         // ----------- reset revents, run poll and updateBuffers the player poll players ------------
         for (auto &fd: poll.fds) {
             fd.revents = 0;
         }
 
-        Reporter::debug(Color::Yellow, "Polling...");
-        // int fds_with_events = ::poll(poll.fds.data(), poll.fds.size(), config.timeout_seconds * 1000 / 2.5); // todo adjust granularity
-        int fds_with_events = ::poll(poll.fds, Polling::Connections, 1000);
+        int timeout_ms = static_cast<int>(_pollGetSensibleTimeout_ms());
+        Reporter::debug(Color::Yellow, "Polling with timeout: " + std::to_string(timeout_ms) + " ms.");
+
+        int fds_with_events = ::poll(poll.fds, Polling::Connections, timeout_ms);
         if (fds_with_events < 0) { syserr("poll"); }
-        Reporter::debug(Color::Yellow, "Poll returned with " + std::to_string(fds_with_events) + " fds with events.");
 
         for (auto &[seat, player]: players) {
             if (player.buffer.isConnected())
@@ -280,7 +309,7 @@ private:
             candidate.buffer.update();
         }
 
-        Reporter::debug(Color::Magenta, "Poll updated buffers. \n");
+        Reporter::debug(Color::Magenta, "Poll returned " + std::to_string(fds_with_events) + " fds events and updated buffers. \n");
     }
 
     void _updateDisconnections() {
@@ -292,7 +321,7 @@ private:
                     player.buffer.disconnect();
 
                     // reset the trick request time so that when player reconnects he will immediately get the TRICK message as if he timeout'ed
-                    player.trickRequestTime = -config.timeout_seconds;
+                    player.trickRequestTime_ms = time_ms() - config.timeout_ms();
 
                     Reporter::log(Color::Red, "Player " + ::seatToString(seat) + " disconnected.");
                 }
@@ -376,9 +405,10 @@ private:
         assert(candidate.state == Polling::Candidate::State::WaitingForIAM);
 
         // Check timeout.
-        if (time(nullptr) - candidate.connectionTime > config.timeout_seconds) {
+        if (time_ms() - candidate.connectionTime_ms >= config.timeout_ms()) {
             candidate.buffer.disconnect();
-            Reporter::debug(Color::Red, "Candidate disconnected due to timeout.");
+            Reporter::log(Color::Red, "Candidate disconnected due to timeout.");
+            Reporter::debug(Color::Cyan, "[delta: +" + std::to_string(time_ms() - candidate.connectionTime_ms > config.timeout_ms()) + "ms after timeout]");
             return true;
         }
 
@@ -393,7 +423,7 @@ private:
         auto iam = std::dynamic_pointer_cast<IAm>(msg);
         if (iam == nullptr) {
             candidate.buffer.disconnect();
-            Reporter::debug(Color::Red, "Candidate disconnected due to incorrect message (expected IAM, got " + raw_msg + ").");
+            Reporter::debug(Color::Red, "Candidate disconnected due to incorrect message. Expected IAM, got: " + raw_msg);
             return true;
         }
 
@@ -411,7 +441,7 @@ private:
 
     // Updates the candidate messages and
     // - returns true iff the candidate should be removed (for example due to timeout, wrong message, disconnection etc.)
-    bool _processCandidate(Polling::Candidate& candidate, int timeout_seconds) {
+    bool _processCandidate(Polling::Candidate &candidate) {
         assert(candidate.buffer.hasError() == false);
         assert(candidate.buffer.isConnected() == true);
 
@@ -434,7 +464,7 @@ private:
 
     void _updateCandidateMessages() {
         for (auto candidate = poll.candidates.begin(); candidate != poll.candidates.end(); /*candidate++*/) {
-            if (_processCandidate(*candidate, config.timeout_seconds)) {
+            if (_processCandidate(*candidate)) {
                 // remove the candidate
                 candidate = poll.candidates.erase(candidate);
             } else {
@@ -472,7 +502,7 @@ private:
         std::vector<Card> cardsOnTable;
 
         int trickNumber = Trick::FirstTrickNumber; // 1-13
-        Player* currentPlayer{};
+        Player* currentPlayer = nullptr;
 
         Seat trickWinnerSeat{};
 
@@ -494,9 +524,9 @@ private:
     bool stateShouldPoll = true;
 
     // Function to change the current state.
-    void ChangeState(std::function<void()> newState, bool shouldPoll = true) {
+    void ChangeState(std::function<void()> newState, bool should_poll_before_next_state_call = true) {
         state = std::move(newState);
-        stateShouldPoll = shouldPoll;
+        stateShouldPoll = should_poll_before_next_state_call;
     }
     // ===================================================================================================
 
@@ -570,7 +600,7 @@ private:
         poll.stopAccepting();
         Reporter::log("Game is over. Disconnecting all players.");
         for (auto& [seat, player]: players) {
-            player.buffer.flush(); // very important! this can block, but it's the last message anyway
+            player.buffer.flush(config.timeout_s()); // very important! this can block, but it's the last message anyway
             player.disconnect();
             Reporter::log("Player " + ::seatToString(seat) + " disconnected.");
         }
@@ -718,8 +748,9 @@ private:
             _handleMessageFromCurrentPlayer();
         }
         // 2) or else, if there was a timeout for the *current* player (only the current player can timeout):
-        else if (time(nullptr) - game.currentPlayer->trickRequestTime > config.timeout_seconds) {
+        else if (time_ms() - game.currentPlayer->trickRequestTime_ms >= config.timeout_ms()) {
             Reporter::logWarning("Player " + ::seatToString(game.currentPlayer->seat) + " did not respond in time. ");
+            Reporter::debug(Color::Cyan, "[delta: +" + std::to_string(time_ms() - game.currentPlayer->trickRequestTime_ms > config.timeout_ms()) + "ms after timeout]");
             ChangeState([this] { stateSendTrick(); }, false);
         }
 
@@ -727,7 +758,7 @@ private:
 
     void stateSendTrick() {
         game.currentPlayer->buffer.writeMessage(Trick(game.trickNumber, game.cardsOnTable));
-        game.currentPlayer->trickRequestTime = time(nullptr);
+        game.currentPlayer->trickRequestTime_ms = time_ms();
 
         ChangeState([this] { stateWaitForTrick(); });
     }
