@@ -290,6 +290,10 @@ private:
                 if (player.buffer.hasError()) {
                     // disconnect the player
                     player.buffer.disconnect();
+
+                    // reset the trick request time so that when player reconnects he will immediately get the TRICK message as if he timeout'ed
+                    player.trickRequestTime = -config.timeout_seconds;
+
                     Reporter::log(Color::Red, "Player " + ::seatToString(seat) + " disconnected.");
                 }
             }
