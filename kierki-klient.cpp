@@ -294,12 +294,12 @@ class Client {
         auto msg = Parser::parse(raw);
 
         if (auto deal = std::dynamic_pointer_cast<Deal>(msg)) {
-            Reporter::toUser(deal->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(deal->toStringVerbose());
             stats.takeNewDeal(deal->cards, deal->dealType);
             ChangeState([this] { stateWaitForTrick(); });
         }
         else if (auto busy = std::dynamic_pointer_cast<Busy>(msg)) {
-            Reporter::toUser(busy->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(busy->toStringVerbose());
             exit(1); // exit with error because the seat is taken
         }
         else {
@@ -315,12 +315,12 @@ class Client {
         auto [msg, raw] = readAndParse();
 
         if (auto taken = std::dynamic_pointer_cast<Taken>(msg)) {
-            Reporter::toUser(taken->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(taken->toStringVerbose());
             _updateStatsWithTaken(taken);
             ChangeState([this] { stateWaitForTrick(); });
         }
         else if (auto wrong = std::dynamic_pointer_cast<Wrong>(msg)) {
-            Reporter::toUser(wrong->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(wrong->toStringVerbose());
             ChangeState([this, serverTrick] { stateWaitForTrickWaitForPlayerTrick(serverTrick); });
         }
         else {
@@ -336,8 +336,8 @@ class Client {
             auto raw = Server.readMessage();
             auto msg = Parser::parse(raw);
             if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
-                Reporter::toUser(trick->toStringVerbose()); // print the first part of the trick message
-                Reporter::toUser(stats.availableCardsToString()); // and print the cards available to trick
+                if (not config.isAutomatic) Reporter::toUser(trick->toStringVerbose()); // print the first part of the trick message
+                if (not config.isAutomatic) Reporter::toUser(stats.availableCardsToString()); // and print the cards available to trick
             }
             else _printSkipInfo(raw);
         }
@@ -362,22 +362,22 @@ class Client {
         auto [msg, raw] = readAndParse();
 
         if (auto taken = std::dynamic_pointer_cast<Taken>(msg)) {
-            Reporter::toUser(taken->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(taken->toStringVerbose());
             _updateStatsWithTaken(taken); // we are receiving a history of this seat's player, updateBuffers the stats
             stateWaitForTrick(); // don't repoll stay in this state until there's no more Taken messages
         }
         else if (auto trick = std::dynamic_pointer_cast<Trick>(msg)) {
             // the server wants us to send the trick message
-            Reporter::toUser(trick->toStringVerbose());
-            Reporter::toUser(stats.availableCardsToString());
+            if (not config.isAutomatic) Reporter::toUser(trick->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(stats.availableCardsToString());
             ChangeState([this, trick] { stateWaitForTrickWaitForPlayerTrick(*trick); }); // very important! is to move to next state immediately
         }
         else if (auto score = std::dynamic_pointer_cast<Score>(msg)) {
-            Reporter::toUser(score->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(score->toStringVerbose());
             ChangeState([this] { stateWaitForTotal(); });
         }
         else if (auto total = std::dynamic_pointer_cast<Total>(msg)) { // if received total *first*, then wait for *score* next
-            Reporter::toUser(total->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(total->toStringVerbose());
             ChangeState([this] { stateWaitForScore(); });
         }
         else _printSkipInfo(raw);
@@ -389,7 +389,7 @@ class Client {
 
         auto [msg, raw] = readAndParse();
         if (auto score = std::dynamic_pointer_cast<Score>(msg)) {
-            Reporter::toUser(score->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(score->toStringVerbose());
             ChangeState([this] { stateWaitForNewDeal(); });
         }
         else _printSkipInfo(raw);
@@ -403,7 +403,7 @@ class Client {
         auto raw = Server.readMessage();
         auto msg = Parser::parse(raw);
         if (auto total = std::dynamic_pointer_cast<Total>(msg)) {
-            Reporter::toUser(total->toStringVerbose());
+            if (not config.isAutomatic) Reporter::toUser(total->toStringVerbose());
             ChangeState([this] { stateWaitForNewDeal(); });
         }
         else _printSkipInfo(raw);
@@ -422,14 +422,13 @@ class Client {
         Reporter::debug(Color::Yellow, "Polling...");
         int fds_with_events = ::poll(fds, 3, 1000 * 10); // blocking
         if (fds_with_events < 0) { syserr("poll"); }
-        Reporter::debug(Color::Blue, "Poll returned with " + std::to_string(fds_with_events) + " fds with events.");
 
         Server.update(); // server disconnection is handled in the state functions
         if (!config.isAutomatic) {
             human.updateBuffers();
         }
 
-        Reporter::debug(Color::Magenta, "Poll updated buffers. \n");
+        Reporter::debug(Color::Magenta, "Poll returned " + std::to_string(fds_with_events) + " fds events and updated buffers. \n");
     }
 
 public:

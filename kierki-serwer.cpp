@@ -298,8 +298,10 @@ private:
         int timeout_ms = static_cast<int>(_pollGetSensibleTimeout_ms());
         Reporter::debug(Color::Yellow, "Polling with timeout: " + std::to_string(timeout_ms) + " ms.");
 
+        time_ms_t poll_start_time_ms = time_ms();
         int fds_with_events = ::poll(poll.fds, Polling::Connections, timeout_ms);
         if (fds_with_events < 0) { syserr("poll"); }
+        time_ms_t poll_end_time_ms = time_ms();
 
         for (auto &[seat, player]: players) {
             if (player.buffer.isConnected())
@@ -309,7 +311,8 @@ private:
             candidate.buffer.update();
         }
 
-        Reporter::debug(Color::Magenta, "Poll returned " + std::to_string(fds_with_events) + " fds events and updated buffers. \n");
+        Reporter::debug(Color::Magenta, "[" + std::to_string(poll_end_time_ms - poll_start_time_ms)
+            + "ms] Poll returned: " + std::to_string(fds_with_events) + " fds events and updated buffers.");
     }
 
     void _updateDisconnections() {
