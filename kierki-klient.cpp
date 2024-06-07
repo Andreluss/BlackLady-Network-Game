@@ -187,9 +187,10 @@ class Client {
 
     // state machine
     std::function<void()> state = [] { throw std::runtime_error("State not set."); };
+    bool should_repoll_before_next_state = true;
     void ChangeState(std::function<void()> newState) {
         state = std::move(newState);
-        state(); // move to the new state immediately to prevent lock on poll
+        should_repoll_before_next_state = false;
     }
 
     // helper functions
@@ -444,7 +445,9 @@ public:
 
         while (true) {
             // make sure there is some event and StdIn is not broken
-            RePoll();
+            if (should_repoll_before_next_state) {
+                RePoll();
+            } should_repoll_before_next_state = true;
 
             if (!config.isAutomatic) {
                 // handle player input (if any), but if there's a trick input, don't handle it yet
