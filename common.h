@@ -1,7 +1,7 @@
 #ifndef UNTITLED4_COMMON_H
 #define UNTITLED4_COMMON_H
 
-#define BlackLadyDebug 0
+#define BlackLadyDebug 1
 
 // ------------------------- Common includes -------------------------
 
@@ -246,6 +246,9 @@ public:
     }
     static void log(std::string message) {
         std::cerr << Color::Green << message << Color::Reset << std::endl;
+    }
+    static void log(const char* color, std::string message) {
+        std::cerr << color << message << Color::Reset << std::endl;
     }
     static void logError(std::string message) {
         std::cerr << Color::Red << "[Error] " << Color::Reset << message << std::endl;
@@ -866,7 +869,8 @@ public:
         }
         // check if any error occurred and if so, the buffer is broken and the client should be disconnected and his data cleared
         if (updateErrors()) {
-            disconnect();
+//            disconnect();
+            Reporter::debug(Color::Yellow, "Error detected in the buffer.");
             return;
         }
         updatePollIn();

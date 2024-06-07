@@ -290,7 +290,7 @@ private:
                 if (player.buffer.hasError()) {
                     // disconnect the player
                     player.buffer.disconnect();
-                    Reporter::debug(Color::Red, "Player " + ::seatToString(seat) + " disconnected.");
+                    Reporter::log(Color::Red, "Player " + ::seatToString(seat) + " disconnected.");
                 }
             }
         }
