@@ -991,7 +991,7 @@ struct PlayerStats {
         result += listToString(hand.begin(), hand.end(), [](Card card) {
             return card.toString();
         }, ", ");
-//        result += "\r\n";
+        result += "\r\n";
         return result;
     }
 

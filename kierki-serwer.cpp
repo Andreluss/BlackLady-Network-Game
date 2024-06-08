@@ -495,7 +495,7 @@ private:
                 Reporter::debug(Color::Green, "Safe poll finished. All players connected!");
                 return;
             }
-//            Reporter::debug(Color::Yellow, "Waiting for all players to connect...");
+            Reporter::debug(Color::Blue, "Still waiting for all players to connect...");
         }
     }
 
