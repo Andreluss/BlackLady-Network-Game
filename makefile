@@ -1,14 +1,14 @@
 # Compiler settings
 CXX = g++
-CXXFLAGS = -std=c++20 -Wall -Wextra
+CXXFLAGS = -std=c++20 -Wall -Wextra -O2
 
 # Source files
-SRCS_SERVER = kierki-serwer.cpp
-SRCS_CLIENT = kierki-klient.cpp
+SRCS_SERVER = kierki-serwer.cpp common.h
+SRCS_CLIENT = kierki-klient.cpp common.h
 
 # Object files
-OBJS_SERVER = obj/$(SRCS_SERVER:.cpp=.o)
-OBJS_CLIENT = obj/$(SRCS_CLIENT:.cpp=.o)
+OBJS_SERVER = obj/kierki-serwer.o
+OBJS_CLIENT = obj/kierki-klient.o
 
 # Executable name
 EXEC_SERVER = kierki-serwer
