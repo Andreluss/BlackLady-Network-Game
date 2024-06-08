@@ -3,12 +3,12 @@ CXX = g++
 CXXFLAGS = -std=c++20 -Wall -Wextra -O2
 
 # Source files
-SRCS_SERVER = kierki-serwer.cpp common.h
-SRCS_CLIENT = kierki-klient.cpp common.h
+SRCS_SERVER = kierki-serwer.cpp 
+SRCS_CLIENT = kierki-klient.cpp
 
 # Object files
-OBJS_SERVER = obj/kierki-serwer.o
-OBJS_CLIENT = obj/kierki-klient.o
+OBJS_SERVER = obj/kierki-serwer.o common.h
+OBJS_CLIENT = obj/kierki-klient.o common.h
 
 # Executable name
 EXEC_SERVER = kierki-serwer
@@ -27,4 +27,4 @@ obj/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS_SERVER) $(OBJS_CLIENT) $(EXEC_SERVER) $(EXEC_CLIENT)
+	rm -fr obj $(EXEC_SERVER) $(EXEC_CLIENT)
