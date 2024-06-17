@@ -507,7 +507,7 @@ public:
     }
 
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "Place busy, list of busy places received: ";
         result += listToString<Seat>(busy_seats, [](const Seat &seat) { return ::seatToString(seat); });
         result += ".\r\n";
@@ -531,7 +531,7 @@ public:
     }
 
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "New deal " + std::to_string(static_cast<int>(dealType)) + ": staring place " +
                 ::seatToString(firstSeat) + ", your cards: ";
         result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
@@ -560,7 +560,7 @@ public:
 
     // CAUTION! The message 'Available: <lista kart, które gracz jeszcze ma na ręce>' should be printed by the caller!
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "Trick: (" + std::to_string(trickNumber) + ") ";
         result += listToString<Card>(cards, [](const Card &card) { return card.toString(); });
         result += "." /*"\r\n"*/;
@@ -579,7 +579,7 @@ public:
     }
 
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "Wrong message received in trick " + std::to_string(trickNumber) + ".\r\n";
         return result;
     }
@@ -603,7 +603,7 @@ public:
     }
 
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "A trick " + std::to_string(trickNumber) + " is taken by " + ::seatToString(takerSeat) + ", cards ";
         result += listToString<Card>(cardsOnTable, [](const Card &card) { return card.toString(); });
         result += ".\r\n";
@@ -624,7 +624,7 @@ public:
         return result;
     }
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "The scores are:\n";
         for (const auto& [seat, score]: scores) {
             result += ::seatToString(seat) + " | " + std::to_string(score) + "\n";
@@ -646,7 +646,7 @@ public:
         return result;
     }
     [[nodiscard]] std::string toStringVerbose() const override {
-        std::string result = this->toString();
+        std::string result/*  = this->toString() */;
         result += "The total scores are:\n";
         for (const auto& [seat, score]: total_scores) {
             result += ::seatToString(seat) + " | " + std::to_string(score) + "\n";
